@@ -1,0 +1,244 @@
+Task 1: Database construction— Experimental papers with pre-registration
+1
+Task 1: Database construction— 
+Experimental papers with pre-registration
+Task description: Compile the database of experimental papers with pre-registration and pre-analysis 
+plans
+Assistant: 
+Status: v1 instructions ready
+Background
+Motivation
+The credibility of published scientific findings has become the forefront of empirical research in social 
+sciences in recent years, leading to a significant emphasis on the principles of “Open Science.” This 
+movement seeks to enhance the transparency and reproducibility of scientific research through 
+various reforms. Among these, pre-registration and pre-analysis plans (see “Introduction to pre-
+registration and pre-analysis plans” below) have gained considerable traction, as they are (believed to 
+be) pivotal in fostering transparent research practices. 
+We aim to understand the adoption of pre-registration and pre-analysis plans within the domain of 
+experimental economics. This will be achieved by systematically investigating articles published in 19 
+top-tier economics journals spanning the years 2017 to 2023.
+The objective is to compile a database of published papers containing experimental data that are 
+accompanied by pre-registration and pre-analysis plans.
+What we have done so far
+As the first step, we have downloaded all the PDF files of articles published in 19 leading economics 
+journals (listed below) from 2017 to 2023. 
+Background
+Motivation
+What we have done so far
+Materials
+Task
+1. Check if the paper uses data (observational or experimental)
+2. Check if the paper contains pre-registration and/or detailed pre-analysis plans
+3. Extract pre-registration / pre-analysis plans information
+4. Download pre-registration / pre-analysis plans (if they exist)
+5. Code the type of empirical/experimental data
+6. Housekeeping
+Procedure
+Introduction to pre-registration and pre-analysis plans
+“Replication crisis”
+What is (pre-)registration?
+What is (pre-)analysis plan?
+Examples of pre-registration and pre-analysis plans
+
+Task 1: Database construction— Experimental papers with pre-registration
+2
+📚American Economic Journal: Applied Economics, American Economic Journal: Economic 
+Policy, American Economic Journal: Microeconomics, American Economic Review, American 
+Economic Review: Insights, Econometrica, Economic Journal, Experimental Economics, 
+Games and Economic Behavior, Journal of Development Economics, Journal of Economic 
+Behavior & Organization, Journal of the Economic Science Association, Journal of the 
+European Economic Association, Journal of Political Economy, Journal of Public Economics, 
+Management Science, Quarterly Journal of Economics, Review of Economic Studies, Review 
+of Economics and Statistics
+Subsequently, we conducted a comprehensive full-text keyword search to identify articles potentially 
+containing pre-registrations and/or detailed pre-analysis plans. Additionally, we employed keywords 
+such as "experiment," "laboratory," "RCT," etc., to gauge the prevalence of experimental studies within 
+the articles under examination.
+💬Keywords related to pre-registration and pre-analysis plans:
+analysis plan , pre-analysis plan , PAP , preregist , pre-regist , register , registration
+Keywords related to pre-registration platforms:
+AEA RCT , AEARCT , socialscienceregistry , Open Science Framework , OSF , AsPredicted , EGAP , RIDIE , 
+clinicaltrials  
+Keywords related to experiments:
+experiment , laboratory , field , laboratory experiment , field experiment , online experiment , 
+intervention , randomized trial , randomized control trial , RCT  
+We now have a set of research articles that are likely to
+have experiments conducted in the laboratory, in the field, or online (including randomized trials), 
+and
+have pre-registration and/or detailed pre-analysis plans.
+Of course, keyword searches may occasionally flag papers that do not actually have any pre-
+registration or pre-analysis plans. For instance, a paper theoretically studying the concept of pre-
+registration, without any empirical or experimental data, could trigger a “YES” result in our search 
+process. Likewise, there is a possibility that we might overlook papers containing pre-registration or 
+pre-analysis plans if the authors describe pre-registration in an unconventional manner in the paper.
+Correcting the second type of error is not straightforward. To address the first challenge, we intend to 
+mitigate it by manually examining papers identified through our keyword search.
+Materials
+Folders containing papers identified by the search
+1. hit_pap : all hits— including keywords related to experiment AND pre-registration
+2. hit_pap_aearct : subset of 1, including keywords related to AEA RCT Registry
+3. hit_pap_aspredicted : subset of 1, including keywords related to AsPredicted
+4. hit_pap_osf : subset of 1, including keywords related to Open Science Framework
+→ Each of them has subfolders by journal, volume, issue
+
+Task 1: Database construction— Experimental papers with pre-registration
+3
+Spreadsheet for coding
+https://docs.google.com/spreadsheets/d/1dYL5D3Rs_vzm9GYu6CLE_rpVa2r6wDVcDBkS69UzKYs/edit?
+usp=sharing
+Task
+The task consists of 6 main steps
+1. Check if the paper uses data (observational or experimental)
+2. Check if the paper contains pre-registration and/or detailed pre-analysis plans
+3. Extract pre-registration / pre-analysis plan information
+4. Download pre-registration / pre-analysis plans (if they exist)
+5. Code the type of experimental data
+6. Housekeeping
+1. Check if the paper uses data (observational or experimental)
+Check for the presence of observational or experimental data in the paper.
+The title of the paper may be indicative
+Read the abstract
+Skim through the paper— are there any figures or (regression) tables?
+If none is found (such as in theoretical studies or review articles), code no_data=1 , skip the rest of the 
+steps, and proceed to the next paper.
+2. Check if the paper contains pre-registration and/or detailed pre-analysis plans
+Search for indications of pre-registration or pre-analysis plans using keyword search. Utilize the 
+keywords identified during the full-text search. Confirmation of pre-registration or pre-analysis is 
+attained if authors explicitly declare, for instance, “we pre-registered this study …,” or provide a link or 
+ID to pre-registration (e.g., “AEARCTR-0002106” or “AsPredicted #25308”).
+If YES, code prereg=1  and proceed to the next step.
+If NO, code prereg=0  and proceed to the next paper.
+Tips
+Columns key_10  - key_19  are about pre-registration platforms. If some of these columns have non-
+zero numbers, you can search these keywords.
+Links to the pre-registration/pre-analysis plans documents are often mentioned in the footnote of 
+the first page of the paper
+Example → “The experiments were pre-registered in the AsPredicted registry (#74868; 
+#107190; #137055)”
+… but not always— sometimes the paper mentions this in the middle, for example, after the 
+experimental design is explained.
+Example → “We preregistered the experimental design and the hypotheses on AsPredicted.org 
+(see Supplementary Information B.6).” on p. 13
+
+Task 1: Database construction— Experimental papers with pre-registration
+4
+3. Extract pre-registration / pre-analysis plans information
+Code 1  in the column (all that apply) that corresponds to the registry used by the authors (and 0  
+otherwise; multiple 1 ’s can happen).
+use_aearct  if the authors used AEA RCT Registry
+use_osf  if the authors used Open Science Framework
+use_aspredicted  if the authors used AsPredicted
+use_other  if the authors used other platforms (including ClinicalTrials)
+Copy the link to the column link_prereg . 
+If there is more than one pre-registration, add all links in one cell, by separating with “; “ (e.g. 
+“ link_1; link_2; link_3 ”).
+4. Download pre-registration / pre-analysis plans (if they exist)
+If the pre-registration/pre-analysis plans document is available (as a PDF/Word/txt file), download it.
+Save the file in the same folder as the paper you are looking at.
+If the paper’s file name is abcde.pdf , save the pre-registration document as prereg_abcde.pdf . If 
+multiple files exist, add IDs such as prereg_1_abcde.pdf , prereg_2_abcde.pdf,  …
+On the AEA RCT Registry, some authors upload documents under the section “Analysis Plan”. If the 
+paper has a pre-registration on the AEA RCT Registry ( use_aearct=1 ), check the following:
+if you find a publicly available document, code aearct_pap=1
+If the document is not publicly available, code aearct_pap=2
+If the section is empty, code aearct_pap=0
+
+Task 1: Database construction— Experimental papers with pre-registration
+5
+5. Code the type of empirical/experimental data
+Code =1  in all relevant columns
+type_lab : Laboratory experiment
+type_field : Field experiment (including RCTs)
+type_online : Online experiment (e.g. Amazon Mechanical Turk, Prolific)
+type_survey : Unincentivized survey (no experimental component)
+type_obs : Observational data (using already existing data like census or labor stat, no experimental 
+component)
+type_repl : Replication of other studies
+type_other : None of the above → write the type here
+6. Housekeeping
+flag : Express the degree of “uncertainty” you experience while coding this paper
+=0  if there is nothing to discuss about this paper
+=1 , 2 , …, 9 , 10  if you want to discuss something about this paper (capturing the lack of 
+“confidence” in your coding— larger number → more unclear/ambiguous)
+comment : Add any comments you have about the paper
+Procedure
+1. As a test run, we can start with 5-10 papers (from 2-3 different journals) that contain the keyword 
+aspredicted , which indicates that the paper likely has a pre-registration on the AsPredicted platform
+Uncheck 0  in the filter for column key_16  → there are 61 papers
+Folder hit_pap_aspredicted  contains these 61 papers
+Try steps 1-6 above
+2. Then, try another 5-10 papers (from 2-3 different journals) that contain the keyword related to AEA RCT 
+Registry
+Reset the filter for column key_16 , and uncheck 0  in columns key_10  AND key_11  → there are 215 
+papers
+Folder hit_pap_aearct  contains these papers (plus other papers; filter used there was “ key_10=1  OR 
+key_11=1  OR key_12=1 ")
+3. Discuss the findings and resolve uncertainty in the instructions
+Introduction to pre-registration and pre-analysis plans
+“Replication crisis”
+
+Task 1: Database construction— Experimental papers with pre-registration
+6
+Over the past decade, we have observed many cases in which results from well-known experiments were 
+not replicated by other researchers. This is often called the “replication crisis,” and has been documented 
+in many fields in social sciences. There are many reasons why some findings fail to replicate. We introduce 
+the following important concepts for our discussion.
+“Publication bias” → The scientific journal publishing system is in favor of “positive” or “statistically 
+significant (usually 
+﻿)” findings, leaving “null results” (which fail to reject the hypothesis) 
+underreported.
+“P-hacking” → Scientists need to publish papers to get a job or promotion. They understand the current 
+system of scientific publishing, which has the problem of publication bias just described above. What 
+do they do, in response? They may try to obtain “statistically significant (p < 0.05)” results, either 
+consciously or unconsciously. There are several ways to achieve this. 
+“HARKing” (Hypothesizing After the Result is Known) → A researcher tried to test hypothesis X, but 
+after collecting data and analyzing it, he realized that he could not reject hypothesis X. He then tried 
+another hypothesis Y, and it “worked”. He writes the paper as if he had hypothesis Y in his mind from 
+the beginning, and never mentions hypothesis X. 
+“Specification search” → This is one form of p-hacking. A researcher ran a regression analysis, but he 
+did not get a statistically significant effect. He then tried many other specifications by including 
+additional variables or excluding some observations from the regression until he got a significant result. 
+He reports only the model that “worked,” never mentioning the million other models he tried. 
+“Optional stopping” → A researcher conducted an experiment with 100 participants. He could not find a 
+significant result, so he decided to collect 20 more participants. Still no effect. He got 20 more 
+observations and got 
+﻿! He stopped data collection. 
+P-hacking, HARKing, specification search, and optional stopping are all part of the so-called 
+“Questionable Research Practice (QRP)”.
+What is (pre-)registration?
+If you think about QRPs (such as p-hacking, HARKing, and specification search), you may notice that the 
+core of this problem is that: “researchers can change their hypothesis, regression model, or even sample 
+size of the experiment, after seeing some part of the data”. 
+Registration of a study is the idea that researchers “publicly declare” the hypothesis they are going to test, 
+the statistical tests they are going to implement, and the number of observations they are going to collect. 
+It must be “public” (otherwise, there is no point!), so there are central registries for study registration. 
+Examples: 
+AEA RCT Registry
+Open Science Framework (OSF)
+AsPredicted
+Researchers are strongly encouraged to register “before” the data collection starts. That is why we 
+often call it “pre-”registration. 
+Have a look at AEA RCT Registry to get an idea!
+What is (pre-)analysis plan?
+In addition to pre-registration, researchers can also write an analysis plan that describes the experimental 
+protocol and data analysis in more detail. Researchers can upload an analysis plan along with their study 
+registration.
+See also:
+p < 0.05
+p < 0.05
+
+Task 1: Database construction— Experimental papers with pre-registration
+7
+OSF
+https://osf.io/gqywv
+10 Things to Know About Pre-Analysis Plans
+https://egap.org/resource/10-things-to-know-about-pre-analysis-plans/
+Examples of pre-registration and pre-analysis plans
+https://www.socialscienceregistry.org/trials/3060
+This pre-registration has pre-analysis plans. See “Analysis Plan” section.
+https://www.socialscienceregistry.org/trials/4493
+This pre-registration does not have a pre-analysis plan. 
+https://aspredicted.org/blind.php?x=x954rp
+This is an example of pre-registration on the AsPredicted platform
+https://doi.org/10.17605/OSF.IO/WSXD9
+This is an example of pre-registration on OSF

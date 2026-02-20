@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# OS / editor
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Data / outputs (not versioned)
+output/
+
+# Local datasets (keep out of GitHub)
+journal_articles_with_pap_2025-03-14.xlsx
+*.xlsx
+
+# Logs / temp / backups
+*.log
+*.bak
+
+# Large binaries (keep repo light)
+*.pdf

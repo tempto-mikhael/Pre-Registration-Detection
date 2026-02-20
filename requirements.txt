@@ -1,0 +1,13 @@
+# Core pipeline
+openpyxl
+requests
+beautifulsoup4
+lxml
+tqdm
+
+# PDF text extraction
+PyMuPDF
+pdfminer.six
+
+# Report generation
+reportlab
