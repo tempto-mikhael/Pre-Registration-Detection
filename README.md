@@ -54,8 +54,10 @@ Copy-Item .env.example .env
 Supported keys:
 
 - `GEMINI_API_KEY`: Gemini API key.
-- `GOOGLE_API_KEY`: alternate Gemini key name accepted by `llm_verify.py`.
+- `CHATGPT_API_KEY`:ChatGPT API key.
+- `CLAUDE_API_KEY`: Claude API key.
 - `OPENROUTER_API_KEY`: OpenRouter API key.
+- Note: This supports further additions of different api keys. 
 
 ## Important Inputs
 
