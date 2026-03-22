@@ -464,7 +464,7 @@ def build_groups(scan, enriched, xlsx, requested_groups):
     return papers
 
 
-# ── Gemini API call ───────────────────────────────────────────────────────────
+# ── Direct provider call helpers ─────────────────────────────────────────────
 
 MAX_RETRIES = 5
 
@@ -626,8 +626,8 @@ def openrouter_chat_completion(
     return text, input_tokens, output_tokens
 
 
-def call_gemini(client, paper: dict, max_chars: int) -> dict:
-    """Send one paper to Gemini and return parsed verdict. Retries on 429."""
+def call_native_provider_single(client, paper: dict, max_chars: int) -> dict:
+    """Send one paper to the direct provider client and return a parsed verdict."""
     prompt = build_single_prompt(paper, max_chars)
 
     for attempt in range(1, MAX_RETRIES + 1):
@@ -692,8 +692,8 @@ def call_gemini(client, paper: dict, max_chars: int) -> dict:
     }
 
 
-def call_gemini_batch(client, papers: list, max_chars: int) -> list:
-    """Send a batch of papers in one request and return list of parsed verdicts."""
+def call_native_provider_batch(client, papers: list, max_chars: int) -> list:
+    """Send a batch of papers through the direct provider client and parse results."""
     n = len(papers)
     # Build combined prompt
     paper_sections = []
@@ -1336,7 +1336,7 @@ def main():
             print(f"    - {p['group']}: {p['filename'][:60]}")
 
         if provider == "gemini":
-            results = call_gemini_batch(client, batch, args.max_chars)
+            results = call_native_provider_batch(client, batch, args.max_chars)
             used_model = selected_model
         else:
             results, used_model, used_idx = call_openrouter_batch_with_fallback(
