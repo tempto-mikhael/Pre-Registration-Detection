@@ -83,7 +83,7 @@ The code is not limited to one specific spreadsheet or one specific PDF collecti
 - `output/prelabeled_verify.csv`: validation of already human-labeled preregistered papers.
 - `output/pdf_scan_results.csv`: folder scan output.
 - `output/pdf_scan_prereg_links.csv`: enrichment of folder-scan hits.
-- `output/pdf_scan_prereg_links_dedup.csv`: expected deduplicated enrichment file used by later scripts.
+- `output/pdf_scan_prereg_links_dedup.csv`: deduplicated enrichment file produced from the raw enrichment CSV.
 - `output/llm_gemini_verdicts.csv`: LLM review results, even when OpenRouter is used.
 - `output/comparison_report.csv`: side-by-side comparison of automated results and spreadsheet labels.
 - `output/findings_*.xlsx` and `output/pipeline_findings_*.xlsx`: reporting workbooks.
@@ -105,6 +105,7 @@ Folder-first:
 ```powershell
 .\.venv\Scripts\python.exe scripts\scan_pdf_folder.py --folder "<path-to-pdf-root>"
 .\.venv\Scripts\python.exe scripts\enrich_pdf_scan_links.py
+.\.venv\Scripts\python.exe scripts\dedup_pdf_scan_prereg_links.py
 .\.venv\Scripts\python.exe scripts\author_confirm_links.py
 .\.venv\Scripts\python.exe scripts\no_title_ai_check.py
 .\.venv\Scripts\python.exe scripts\llm_verify.py --group all
@@ -125,9 +126,10 @@ Folder-first path:
 
 1. `scan_pdf_folder.py` scans local PDFs directly.
 2. `enrich_pdf_scan_links.py` tries to find and validate registry links for the detected papers.
-3. `author_confirm_links.py` upgrades weak matches via author overlap.
-4. `no_title_ai_check.py` uses an LLM when title-based validation is impossible.
-5. `build_pipeline_findings_xlsx.py` creates a workbook based only on pipeline outputs.
+3. `dedup_pdf_scan_prereg_links.py` collapses repeated enrichment rows into one best row per paper.
+4. `author_confirm_links.py` upgrades weak matches via author overlap.
+5. `no_title_ai_check.py` uses an LLM when title-based validation is impossible.
+6. `build_pipeline_findings_xlsx.py` creates a workbook based only on pipeline outputs.
 
 ## Script And Function Reference
 
@@ -246,6 +248,12 @@ Functions:
 - `get_verdict(all_links, voter_fp, text)`: converts source evidence into a coarse final verdict string.
 - `main()`: reads `results.csv`, runs all enrichment sources, validates the best link, optionally upgrades uncertain links using authors, and writes `output/preregfind.csv`.
 
+CLI:
+
+- `--results`: override the default input results CSV.
+- `--output`: override the default output CSV.
+- `--oa-pdfs-dir`: point cached-PDF rechecks at a different folder.
+
 How it works:
 
 1. Start from papers already flagged `auto_prereg=1`.
@@ -295,13 +303,41 @@ Functions:
 
 This script reuses many functions from `find_prereg_links.py` rather than reimplementing them.
 
+CLI:
+
+- `--scan`: override the default scan CSV.
+- `--output`: override the default enrichment CSV.
+- `--delay`, `--sample`, `--overwrite`: control pacing and resumability.
+
+### `scripts/dedup_pdf_scan_prereg_links.py`
+
+Purpose: deduplicate raw enrichment output into one best row per paper while preserving the union of discovered links.
+
+Behavior:
+
+- Reads `pdf_scan_prereg_links.csv` by default.
+- Chooses the strongest row per paper based on link quality and row completeness.
+- Writes `pdf_scan_prereg_links_dedup.csv` by default.
+- Adds `dedup_row_count` so you can see how many raw rows were collapsed.
+
+CLI:
+
+- `--input`: override the raw enrichment CSV.
+- `--output`: override the deduplicated enrichment CSV.
+
 ### `scripts/author_confirm_links.py`
 
 Purpose: upgrade weak link matches using author overlap.
 
 Functions:
 
-- `main()`: loads `pdf_scan_prereg_links_dedup.csv`, re-checks candidate rows with weak link quality, computes author overlap, upgrades strong matches to `AUTHOR_CONFIRMED`, and writes the CSV back in place.
+- `main()`: loads an enriched links CSV, re-checks candidate rows with weak link quality, computes author overlap, upgrades strong matches to `AUTHOR_CONFIRMED`, and writes the CSV back in place or to a new output path.
+
+CLI:
+
+- `--enriched`: override the default enriched input CSV.
+- `--output`: optionally write to a separate output CSV instead of updating in place.
+- `--delay`, `--overwrite`: control pacing and reprocessing.
 
 ### `scripts/find_title_mismatches.py`
 
@@ -331,6 +367,10 @@ Functions:
 - `build_comparison(scan, enriched, xlsx)`: creates one merged row per paper and computes agreement categories.
 - `main()`: prints tier summaries, computes precision/recall-style summaries, and writes `output/comparison_report.csv`.
 
+CLI:
+
+- `--xlsx`, `--scan`, `--enriched`, `--output`: override the default reference and output files.
+
 ### `scripts/build_findings_xlsx.py`
 
 Purpose: merge a source workbook with scan, link, and LLM outputs.
@@ -356,6 +396,14 @@ Functions:
 - `to_bool_or_none(val)`: safe boolean coercion from string values.
 - `extract_evidence_location(evidence, reasoning)`: infers where in the paper the LLM seems to have found prereg evidence.
 - `main()`: merges scan, link, AI, and identifier data into `output/pipeline_findings_<date>.xlsx`.
+
+CLI:
+
+- `--scan`: override the default scan CSV.
+- `--links`: override the default enriched links CSV.
+- `--verdicts`: override the default LLM verdict CSV.
+- `--xlsx`: override the default reference spreadsheet.
+- `--output`: override the output workbook path.
 
 ### `scripts/llm_batch_prepare.py`
 
@@ -395,12 +443,12 @@ Core data and prompt helpers:
 
 - `load_env_file(env_path)`: loads `.env` values.
 - `build_paper_section(paper, index, text)`: builds one paper section for a multi-paper batch prompt.
-- `load_xlsx()`: loads spreadsheet labels keyed by filename.
-- `load_scan()`: loads scan output keyed by filename.
-- `load_enriched()`: loads enrichment output keyed by filename.
-- `load_done()`: loads already-processed filenames from `llm_gemini_verdicts.csv`.
+- `load_xlsx(xlsx_path)`: loads spreadsheet labels keyed by filename.
+- `load_scan(scan_csv)`: loads scan output keyed by filename.
+- `load_enriched(enriched_csv)`: loads enrichment output keyed by filename.
+- `load_done(results_csv)`: loads already-processed filenames from the verdict CSV.
 - `extract_text(pdf_path, max_chars)`: extracts full text or a head-plus-tail sample for LLM review.
-- `build_groups(scan, enriched, xlsx, requested_groups)`: builds groups A, B, C, and D.
+- `build_groups(scan, enriched, xlsx, requested_groups, done_filenames=None)`: builds groups A, B, C, and D.
 
 Provider helpers:
 
@@ -415,7 +463,7 @@ Provider helpers:
 
 API Key (direct provider) execution:
 
-- `call_native_provider_single(client, paper, max_chars)`: sends one paper to Gemini and parses a verdict.
+- `call_native_provider_single(client, paper, max_chars)`: sends one paper to the direct provider client and parses a verdict.
 - `call_native_provider_batch(client, papers, max_chars)`: sends multiple papers in one LLM request and splits the results back out.
 
 OpenRouter execution:
@@ -429,9 +477,17 @@ OpenRouter execution:
 Rate limiting and output:
 
 - `TokenBucket`: simple token-per-minute limiter used to avoid provider limits.
-- `append_result(result)`: appends one result row to the results CSV.
-- `print_summary()`: prints a grouped summary of accumulated LLM results.
+- `append_result(result, results_csv)`: appends one result row to the results CSV.
+- `print_summary(results_csv)`: prints a grouped summary of accumulated LLM results.
 - `main()`: parses CLI options, loads data, builds groups, sends batches, and writes `output/llm_gemini_verdicts.csv`.
+
+CLI:
+
+- `--scan`: override the default scan CSV.
+- `--enriched`: override the default enriched CSV.
+- `--xlsx`: override the default reference spreadsheet.
+- `--results-csv`: override the verdict output CSV.
+- Provider and batching flags still work as before.
 
 Group meanings:
 
@@ -465,12 +521,15 @@ Purpose: quick console-only inspection of `results.csv`.
 
 Notes:
 
-- This is a legacy utility with a hard-coded absolute path from an earlier development setup.
 - It is not resumable and is not part of the main pipeline.
 
 Behavior:
 
 - Loads `results.csv`, prints per-row TP/TN/FP/FN style status against spreadsheet labels, then prints a summary.
+
+CLI:
+
+- `--results`: override the default `output/results.csv` path.
 
 ### `scripts/clean_results.py`
 
@@ -478,20 +537,25 @@ Purpose: remove empty rows from `results.csv`.
 
 Notes:
 
-- This is another legacy utility with a hard-coded absolute path from an earlier development setup.
 - It makes a `.bak` backup and rewrites the CSV.
 
 Behavior:
 
 - Filters out rows with no journal, DOI, or PDF filename.
 
+CLI:
+
+- `--results`: override the default `output/results.csv` path.
+- `--backup`: override the backup file path.
+
 ## Practical Notes
 
-- `find_prereg_links.py`, `enrich_pdf_scan_links.py`, `compare_results.py`, `author_confirm_links.py`, `llm_verify.py`, and `build_pipeline_findings_xlsx.py` all expect `output/pdf_scan_prereg_links_dedup.csv` to exist, but the dedup script itself is not currently present in this repo.
-- `build_pipeline_findings_xlsx.py` falls back from `pdf_scan_results_v2.csv` to `pdf_scan_results.csv` if needed.
-- `show_results.py` and `clean_results.py` still point to old absolute paths and should be edited before use on this machine.
+- The folder-first enrichment chain now has an explicit dedup step: run `dedup_pdf_scan_prereg_links.py` after `enrich_pdf_scan_links.py` if you want a stable one-row-per-paper CSV for downstream review.
+- `author_confirm_links.py`, `compare_results.py`, `llm_verify.py`, and `build_pipeline_findings_xlsx.py` default to `output/pdf_scan_prereg_links_dedup.csv`, but they now accept explicit path overrides and can fall back to `output/pdf_scan_prereg_links.csv` when needed.
+- `build_pipeline_findings_xlsx.py` still falls back from `pdf_scan_results_v2.csv` to `pdf_scan_results.csv` if needed, and you can also pass a custom scan file explicitly.
+- `show_results.py` and `clean_results.py` now default to `output/results.csv` instead of machine-specific paths.
 - `.gitignore` excludes `output/`, `.env`, `*.pdf`, and `*.xlsx`, so raw data and generated outputs are intentionally not pushed.
-- Some scripts still contain default filenames or path constants that reflect the original development setup. Those defaults can be replaced with any equivalent workbook or PDF collection that matches the expected structure.
+- Several scripts now accept explicit file arguments while still using repo-default paths when omitted. This makes it easier to reuse the workflow with equivalent spreadsheets, scan CSVs, and PDF collections.
 
 
 

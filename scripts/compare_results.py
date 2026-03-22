@@ -32,17 +32,20 @@ Usage:
 """
 
 import csv
+import argparse
 import sys
 from pathlib import Path
 
 import openpyxl
+from path_utils import resolve_existing_path, resolve_output_path
 
 PROJECT_ROOT = Path(__file__).parent.parent
 
-XLSX_PATH      = PROJECT_ROOT / "journal_articles_with_pap_2025-03-14.xlsx"
-SCAN_CSV       = PROJECT_ROOT / "output" / "pdf_scan_results.csv"
-ENRICHED_CSV   = PROJECT_ROOT / "output" / "pdf_scan_prereg_links_dedup.csv"
-OUTPUT_CSV     = PROJECT_ROOT / "output" / "comparison_report.csv"
+DEFAULT_XLSX_PATH = PROJECT_ROOT / "journal_articles_with_pap_2025-03-14.xlsx"
+DEFAULT_SCAN_CSV = PROJECT_ROOT / "output" / "pdf_scan_results.csv"
+DEFAULT_ENRICHED_CSV = PROJECT_ROOT / "output" / "pdf_scan_prereg_links_dedup.csv"
+FALLBACK_ENRICHED_CSV = PROJECT_ROOT / "output" / "pdf_scan_prereg_links.csv"
+DEFAULT_OUTPUT_CSV = PROJECT_ROOT / "output" / "comparison_report.csv"
 
 VERIFIED_QUALITIES = {"VERIFIED", "DOI_CONFIRMED", "AUTHOR_CONFIRMED"}
 
@@ -184,16 +187,38 @@ def build_comparison(scan: dict, enriched: dict, xlsx: dict) -> list:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    parser = argparse.ArgumentParser(description="Compare scan and enrichment results against a reference spreadsheet")
+    parser.add_argument("--xlsx", type=str, default=None,
+                        help=f"Path to reference spreadsheet (default: {DEFAULT_XLSX_PATH})")
+    parser.add_argument("--scan", type=str, default=None,
+                        help=f"Path to scan CSV (default: {DEFAULT_SCAN_CSV})")
+    parser.add_argument("--enriched", type=str, default=None,
+                        help=f"Path to enriched CSV (default: {DEFAULT_ENRICHED_CSV})")
+    parser.add_argument("--output", type=str, default=None,
+                        help=f"Path to output CSV (default: {DEFAULT_OUTPUT_CSV})")
+    args = parser.parse_args()
+
+    xlsx_path = resolve_existing_path(args.xlsx, DEFAULT_XLSX_PATH, "reference spreadsheet")
+    scan_csv = resolve_existing_path(args.scan, DEFAULT_SCAN_CSV, "scan CSV")
+    enriched_csv = resolve_existing_path(
+        args.enriched,
+        DEFAULT_ENRICHED_CSV,
+        "enriched CSV",
+        fallbacks=[FALLBACK_ENRICHED_CSV],
+        required=False,
+    )
+    output_csv = resolve_output_path(args.output, DEFAULT_OUTPUT_CSV)
+
     print("Loading xlsx ground truth...")
-    xlsx = load_xlsx(XLSX_PATH)
+    xlsx = load_xlsx(xlsx_path)
     print(f"  {len(xlsx)} papers in xlsx")
 
     print("Loading pdf_scan_results.csv (full scan)...")
-    scan = load_scan_all(SCAN_CSV)
+    scan = load_scan_all(scan_csv)
     print(f"  {len(scan)} papers scanned total")
 
-    print("Loading pdf_scan_prereg_links_dedup.csv (enrichment pass)...")
-    enriched = load_enriched_all(ENRICHED_CSV)
+    print(f"Loading {enriched_csv.name} (enrichment pass)...")
+    enriched = load_enriched_all(enriched_csv)
     print(f"  {len(enriched)} papers in enrichment output")
 
     # Tier counts
@@ -270,15 +295,15 @@ def main():
 └──────────────────────────────────────────────────────────────────┘""")
 
     # ── Write output CSV ────────────────────────────────────────────────────
-    OUTPUT_CSV.parent.mkdir(exist_ok=True)
+    output_csv.parent.mkdir(exist_ok=True)
     relevant = [r for r in rows
                 if r["tier1_auto_prereg"] == 1 or r["has_link_evidence"] == 1 or r["xlsx_prereg"] == 1]
-    with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
+    with open(output_csv, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=OUTPUT_FIELDS)
         writer.writeheader()
         writer.writerows(relevant)
 
-    print(f"\nWrote {len(relevant)} relevant rows → {OUTPUT_CSV}")
+    print(f"\nWrote {len(relevant)} relevant rows → {output_csv}")
     print("  (rows where auto_prereg=1 OR has_link_evidence=1 OR xlsx_prereg=1)")
 
 

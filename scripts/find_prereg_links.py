@@ -49,12 +49,14 @@ from urllib.parse import urlparse
 import fitz  # pymupdf
 import requests
 from bs4 import BeautifulSoup
+from path_utils import resolve_existing_path, resolve_output_path
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).parent.parent
-RESULTS_CSV  = PROJECT_ROOT / "output" / "results.csv"
-OUTPUT_CSV   = PROJECT_ROOT / "output" / "preregfind.csv"
-OA_PDFS_DIR  = PROJECT_ROOT / "output" / "oa_pdfs"
+DEFAULT_RESULTS_CSV = PROJECT_ROOT / "output" / "results.csv"
+DEFAULT_OUTPUT_CSV = PROJECT_ROOT / "output" / "preregfind.csv"
+DEFAULT_OA_PDFS_DIR = PROJECT_ROOT / "output" / "oa_pdfs"
+OA_PDFS_DIR = DEFAULT_OA_PDFS_DIR
 
 CONTACT_EMAIL = "makgyumyush22@ku.edu.tr"
 
@@ -840,20 +842,28 @@ def main():
     ap = argparse.ArgumentParser(description="Find pre-registration links for auto_prereg=1 rows")
     ap.add_argument("--all",   action="store_true", help="Include xlsx_prereg=1 rows too")
     ap.add_argument("--delay", type=float, default=1.0)
+    ap.add_argument("--results", type=str, default=None,
+                    help=f"Path to pipeline results CSV (default: {DEFAULT_RESULTS_CSV})")
+    ap.add_argument("--output", type=str, default=None,
+                    help=f"Path to output CSV (default: {DEFAULT_OUTPUT_CSV})")
+    ap.add_argument("--oa-pdfs-dir", type=str, default=None,
+                    help=f"Directory of cached PDFs (default: {DEFAULT_OA_PDFS_DIR})")
     args = ap.parse_args()
 
-    if not RESULTS_CSV.exists():
-        print(f"ERROR: {RESULTS_CSV} not found. Run pipeline.py first.")
-        sys.exit(1)
+    results_csv = resolve_existing_path(args.results, DEFAULT_RESULTS_CSV, "results CSV")
+    output_csv = resolve_output_path(args.output, DEFAULT_OUTPUT_CSV)
 
-    with open(RESULTS_CSV, newline="", encoding="utf-8") as f:
+    global OA_PDFS_DIR
+    OA_PDFS_DIR = Path(args.oa_pdfs_dir) if args.oa_pdfs_dir else DEFAULT_OA_PDFS_DIR
+
+    with open(results_csv, newline="", encoding="utf-8") as f:
         all_rows = list(csv.DictReader(f))
 
     detections = [r for r in all_rows if str(r.get("auto_prereg", "")).strip() == "1"]
     if not args.all:
         detections = [r for r in detections if str(r.get("xlsx_prereg", "")).strip() != "1"]
 
-    print(f"Results file : {RESULTS_CSV}  ({len(all_rows)} total rows)")
+    print(f"Results file : {results_csv}  ({len(all_rows)} total rows)")
     print(f"Detections   : {len(detections)} (auto_prereg=1"
           + (", new only)" if not args.all else ", all)"))
     print()
@@ -992,8 +1002,8 @@ def main():
             "verdict":             vrd,
         })
 
-    OUTPUT_CSV.parent.mkdir(exist_ok=True)
-    with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
+    output_csv.parent.mkdir(exist_ok=True)
+    with open(output_csv, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=FIELDS)
         writer.writeheader()
         writer.writerows(out_rows)
@@ -1006,7 +1016,7 @@ def main():
     lq_author      = sum(1 for x in out_rows if x["best_link_quality"] == "AUTHOR_CONFIRMED")
     lq_uncertain   = sum(1 for x in out_rows if x["best_link_quality"] in ("UNCERTAIN", "TITLE_MISMATCH", "NO_TITLE"))
 
-    print(f"\nWritten {len(out_rows)} rows \u2192 {OUTPUT_CSV}")
+    print(f"\nWritten {len(out_rows)} rows \u2192 {output_csv}")
     print(f"  CONFIRMED (link found)      : {confirmed}")
     print(f"  PROBABLE  (strong kw)       : {probable}")
     print(f"  POSSIBLE  (weak kw)         : {possible}")

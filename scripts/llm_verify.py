@@ -39,6 +39,7 @@ from pathlib import Path
 import fitz  # PyMuPDF
 import openpyxl
 import requests
+from path_utils import resolve_existing_path, resolve_output_path
 
 try:
     from google import genai
@@ -51,10 +52,12 @@ except ImportError:
 
 ROOT = Path(__file__).parent.parent
 OUTPUT_DIR = ROOT / "output"
-SCAN_CSV     = OUTPUT_DIR / "pdf_scan_results.csv"
-ENRICHED_CSV = OUTPUT_DIR / "pdf_scan_prereg_links_dedup.csv"
-XLSX_PATH    = ROOT / "journal_articles_with_pap_2025-03-14.xlsx"
-RESULTS_CSV  = OUTPUT_DIR / "llm_gemini_verdicts.csv"
+DEFAULT_SCAN_CSV = OUTPUT_DIR / "pdf_scan_results.csv"
+FALLBACK_SCAN_CSV = OUTPUT_DIR / "pdf_scan_results_v2.csv"
+DEFAULT_ENRICHED_CSV = OUTPUT_DIR / "pdf_scan_prereg_links_dedup.csv"
+FALLBACK_ENRICHED_CSV = OUTPUT_DIR / "pdf_scan_prereg_links.csv"
+DEFAULT_XLSX_PATH = ROOT / "journal_articles_with_pap_2025-03-14.xlsx"
+DEFAULT_RESULTS_CSV = OUTPUT_DIR / "llm_gemini_verdicts.csv"
 
 VERIFIED_QUALITIES = {"VERIFIED", "DOI_CONFIRMED", "AUTHOR_CONFIRMED"}
 
@@ -284,8 +287,8 @@ fences, no extra text). Each object must be in order matching the paper index:
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 
-def load_xlsx():
-    wb = openpyxl.load_workbook(str(XLSX_PATH), read_only=True, data_only=True)
+def load_xlsx(xlsx_path: Path):
+    wb = openpyxl.load_workbook(str(xlsx_path), read_only=True, data_only=True)
     ws = wb.active
     headers = [c.value for c in list(ws.rows)[1]]
     by_file = {}
@@ -302,31 +305,31 @@ def load_xlsx():
     return by_file
 
 
-def load_scan():
+def load_scan(scan_csv: Path):
     result = {}
-    with open(SCAN_CSV, newline="", encoding="utf-8") as f:
+    with open(scan_csv, newline="", encoding="utf-8") as f:
         for r in csv.DictReader(f):
             fname = Path(r["pdf_path"]).name
             result[fname] = r
     return result
 
 
-def load_enriched():
+def load_enriched(enriched_csv: Path):
     result = {}
-    if not ENRICHED_CSV.exists():
+    if not enriched_csv.exists():
         return result
-    with open(ENRICHED_CSV, newline="", encoding="utf-8") as f:
+    with open(enriched_csv, newline="", encoding="utf-8") as f:
         for r in csv.DictReader(f):
             fname = Path(r["pdf_path"]).name
             result[fname] = r
     return result
 
 
-def load_done() -> set:
+def load_done(results_csv: Path) -> set:
     """Load already-processed filenames from results CSV."""
     done = set()
-    if RESULTS_CSV.exists():
-        with open(RESULTS_CSV, newline="", encoding="utf-8") as f:
+    if results_csv.exists():
+        with open(results_csv, newline="", encoding="utf-8") as f:
             for r in csv.DictReader(f):
                 done.add(r["filename"])
     return done
@@ -368,7 +371,7 @@ def extract_text(pdf_path: str, max_chars: int) -> str:
 
 # ── Group assembly ────────────────────────────────────────────────────────────
 
-def build_groups(scan, enriched, xlsx, requested_groups):
+def build_groups(scan, enriched, xlsx, requested_groups, done_filenames=None):
     papers = []
 
     if "A" in requested_groups:
@@ -436,7 +439,7 @@ def build_groups(scan, enriched, xlsx, requested_groups):
         # did flag them (they exist in the scan CSV, just no keyword hit on re-scan).
         # Exclude any already confirmed via link or already processed by A/B/C.
         already_in = {p["filename"] for p in papers}
-        done_already = load_done()
+        done_already = done_filenames or set()
         for fname, s in scan.items():
             if str(s.get("auto_prereg", "")).strip() != "0":
                 continue
@@ -1154,10 +1157,10 @@ FIELDS = [
 ]
 
 
-def append_result(result: dict):
+def append_result(result: dict, results_csv: Path):
     """Append one result row to the CSV (creating header if new file)."""
-    write_header = not RESULTS_CSV.exists() or RESULTS_CSV.stat().st_size == 0
-    with open(RESULTS_CSV, "a", newline="", encoding="utf-8") as f:
+    write_header = not results_csv.exists() or results_csv.stat().st_size == 0
+    with open(results_csv, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=FIELDS)
         if write_header:
             writer.writeheader()
@@ -1166,11 +1169,11 @@ def append_result(result: dict):
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 
-def print_summary():
-    if not RESULTS_CSV.exists():
+def print_summary(results_csv: Path):
+    if not results_csv.exists():
         return
     results = []
-    with open(RESULTS_CSV, newline="", encoding="utf-8") as f:
+    with open(results_csv, newline="", encoding="utf-8") as f:
         for r in csv.DictReader(f):
             results.append(r)
 
@@ -1230,9 +1233,28 @@ def main():
                         help="Max API calls per run (default: unlimited)")
     parser.add_argument("--reset", action="store_true",
                         help="Delete existing results and start fresh")
+    parser.add_argument("--scan", type=str, default=None,
+                        help=f"Path to scan CSV (default: {DEFAULT_SCAN_CSV})")
+    parser.add_argument("--enriched", type=str, default=None,
+                        help=f"Path to enriched CSV (default: {DEFAULT_ENRICHED_CSV})")
+    parser.add_argument("--xlsx", type=str, default=None,
+                        help=f"Path to reference spreadsheet (default: {DEFAULT_XLSX_PATH})")
+    parser.add_argument("--results-csv", type=str, default=None,
+                        help=f"Path to verdict output CSV (default: {DEFAULT_RESULTS_CSV})")
     args = parser.parse_args()
 
     load_env_file(ROOT / ".env")
+
+    scan_csv = resolve_existing_path(args.scan, DEFAULT_SCAN_CSV, "scan CSV", fallbacks=[FALLBACK_SCAN_CSV])
+    enriched_csv = resolve_existing_path(
+        args.enriched,
+        DEFAULT_ENRICHED_CSV,
+        "enriched CSV",
+        fallbacks=[FALLBACK_ENRICHED_CSV],
+        required=False,
+    )
+    xlsx_path = resolve_existing_path(args.xlsx, DEFAULT_XLSX_PATH, "reference spreadsheet")
+    results_csv = resolve_output_path(args.results_csv, DEFAULT_RESULTS_CSV)
 
     provider = args.provider.lower()
     selected_model = args.model or (DEFAULT_MODEL if provider == "gemini" else None)
@@ -1275,16 +1297,16 @@ def main():
     if "ALL" in groups:
         groups = ["A", "B", "C", "D"]
 
-    if args.reset and RESULTS_CSV.exists():
-        RESULTS_CSV.unlink()
+    if args.reset and results_csv.exists():
+        results_csv.unlink()
         print("Cleared previous results.")
 
     print("Loading data...")
-    scan = load_scan()
-    enriched = load_enriched()
-    xlsx = load_xlsx()
-    papers = build_groups(scan, enriched, xlsx, groups)
-    done = load_done()
+    scan = load_scan(scan_csv)
+    enriched = load_enriched(enriched_csv)
+    xlsx = load_xlsx(xlsx_path)
+    done = load_done(results_csv)
+    papers = build_groups(scan, enriched, xlsx, groups, done_filenames=done)
 
     remaining = [p for p in papers if p["filename"] not in done]
     print(f"  Total in selected groups: {len(papers)}")
@@ -1293,7 +1315,7 @@ def main():
 
     if not remaining:
         print("\nAll papers already processed!")
-        print_summary()
+        print_summary(results_csv)
         return
 
     # Batching setup
@@ -1368,7 +1390,7 @@ def main():
                           else "ERR")
             print(f"    -> {result['filename'][:55]}: "
                   f"{prereg_str} ({result['llm_confidence']})")
-            append_result(result)
+            append_result(result, results_csv)
 
         written = len(batch) - batch_skipped
         papers_done += written
@@ -1385,7 +1407,7 @@ def main():
     elapsed = time.time() - start_time
     print(f"\nDone! Processed {papers_done} papers in {api_calls} API calls, "
           f"{elapsed/60:.1f} minutes.")
-    print(f"Results: {RESULTS_CSV}")
+    print(f"Results: {results_csv}")
 
     if papers_done < len(remaining):
         leftover = len(remaining) - papers_done
@@ -1393,7 +1415,7 @@ def main():
         print(f"\n  ⚠ {leftover} papers remaining — re-run tomorrow "
               f"(~{runs_left} more day(s) needed).")
 
-    print_summary()
+    print_summary(results_csv)
 
 
 if __name__ == "__main__":

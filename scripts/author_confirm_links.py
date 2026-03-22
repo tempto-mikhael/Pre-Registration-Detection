@@ -34,9 +34,11 @@ from find_prereg_links import (
     crossref_authors_by_title,
     author_overlap,
 )
+from path_utils import resolve_existing_path, resolve_output_path
 
 PROJECT_ROOT = Path(__file__).parent.parent
-DEDUP_CSV    = PROJECT_ROOT / "output" / "pdf_scan_prereg_links_dedup.csv"
+DEFAULT_DEDUP_CSV = PROJECT_ROOT / "output" / "pdf_scan_prereg_links_dedup.csv"
+FALLBACK_ENRICHED_CSV = PROJECT_ROOT / "output" / "pdf_scan_prereg_links.csv"
 
 CANDIDATES = {"UNCERTAIN", "TITLE_MISMATCH", "NO_TITLE"}
 AUTHOR_MATCH_THRESHOLD = 0.50
@@ -48,12 +50,21 @@ def main():
                     help="Delay seconds between API calls (default 1.0)")
     ap.add_argument("--overwrite", action="store_true", default=False,
                     help="Re-run author check even if already done")
+    ap.add_argument("--enriched", type=str, default=None,
+                    help=f"Path to enriched CSV (default: {DEFAULT_DEDUP_CSV})")
+    ap.add_argument("--output", type=str, default=None,
+                    help="Optional output path. Defaults to updating the chosen input file in place.")
     args = ap.parse_args()
 
-    if not DEDUP_CSV.exists():
-        sys.exit(f"ERROR: {DEDUP_CSV} not found. Run enrich_pdf_scan_links.py first.")
+    enriched_csv = resolve_existing_path(
+        args.enriched,
+        DEFAULT_DEDUP_CSV,
+        "enriched CSV",
+        fallbacks=[FALLBACK_ENRICHED_CSV],
+    )
+    output_csv = resolve_output_path(args.output, enriched_csv)
 
-    with open(DEDUP_CSV, newline="", encoding="utf-8") as f:
+    with open(enriched_csv, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         orig_fields = list(reader.fieldnames or [])
         rows = list(reader)
@@ -138,7 +149,7 @@ def main():
         time.sleep(args.delay * 0.2)
 
     # Write updated CSV back
-    with open(DEDUP_CSV, "w", newline="", encoding="utf-8") as f:
+    with open(output_csv, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=orig_fields, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
@@ -146,7 +157,7 @@ def main():
     print(f"\nDone.")
     print(f"  Processed          : {len(candidates)}")
     print(f"  Upgraded to AUTHOR_CONFIRMED: {upgraded}")
-    print(f"  Updated: {DEDUP_CSV}")
+    print(f"  Updated: {output_csv}")
     print(f"\nNow rebuild the XLSX:")
     print(f"  python scripts/build_pipeline_findings_xlsx.py")
 

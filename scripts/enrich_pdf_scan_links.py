@@ -28,6 +28,7 @@ import time
 from pathlib import Path
 
 import fitz
+from path_utils import resolve_existing_path, resolve_output_path
 
 # Reuse mature logic from existing enrichment script
 from find_prereg_links import (
@@ -50,8 +51,9 @@ from find_prereg_links import (
 )
 
 PROJECT_ROOT = Path(__file__).parent.parent
-INPUT_CSV = PROJECT_ROOT / "output" / "pdf_scan_results_v2.csv"   # default; override with --scan
-OUTPUT_CSV = PROJECT_ROOT / "output" / "pdf_scan_prereg_links.csv"
+DEFAULT_INPUT_CSV = PROJECT_ROOT / "output" / "pdf_scan_results_v2.csv"
+FALLBACK_INPUT_CSV = PROJECT_ROOT / "output" / "pdf_scan_results.csv"
+DEFAULT_OUTPUT_CSV = PROJECT_ROOT / "output" / "pdf_scan_prereg_links.csv"
 
 DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Za-z0-9]+\b")
 
@@ -159,7 +161,9 @@ def main():
         description="Enrich auto_prereg=1 rows from a scan CSV with verified/found links"
     )
     ap.add_argument("--scan", type=str, default=None,
-                    help="Path to scan CSV (default: output/pdf_scan_results_v2.csv)")
+                    help=f"Path to scan CSV (default: {DEFAULT_INPUT_CSV})")
+    ap.add_argument("--output", type=str, default=None,
+                    help=f"Path to enriched output CSV (default: {DEFAULT_OUTPUT_CSV})")
     ap.add_argument("--delay", type=float, default=1.0,
                     help="Delay base between source requests (default: 1.0)")
     ap.add_argument("--sample", type=int, default=None,
@@ -168,19 +172,13 @@ def main():
                     help="Overwrite output CSV instead of resuming append mode")
     args = ap.parse_args()
 
-    input_csv = Path(args.scan) if args.scan else INPUT_CSV
-    # fall back to v1 if v2 not yet present
-    if not input_csv.exists() and input_csv == INPUT_CSV:
-        fallback = PROJECT_ROOT / "output" / "pdf_scan_results.csv"
-        if fallback.exists():
-            print(f"WARNING: {input_csv.name} not found — falling back to {fallback.name}")
-            input_csv = fallback
-        else:
-            print(f"ERROR: {input_csv} not found. Run scan_pdf_folder.py first.", file=sys.stderr)
-            sys.exit(1)
-    elif not input_csv.exists():
-        print(f"ERROR: {input_csv} not found.", file=sys.stderr)
-        sys.exit(1)
+    input_csv = resolve_existing_path(
+        args.scan,
+        DEFAULT_INPUT_CSV,
+        "scan CSV",
+        fallbacks=[FALLBACK_INPUT_CSV],
+    )
+    output_csv = resolve_output_path(args.output, DEFAULT_OUTPUT_CSV)
 
     with open(input_csv, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
@@ -188,7 +186,7 @@ def main():
     detections = [r for r in rows if str(r.get("auto_prereg", "")).strip() == "1"]
     done_paths = set()
     if not args.overwrite:
-        done_paths = load_done_pdf_paths(OUTPUT_CSV)
+        done_paths = load_done_pdf_paths(output_csv)
 
     pending = [r for r in detections if (r.get("pdf_path", "") or "") not in done_paths]
     if args.sample:
@@ -200,10 +198,10 @@ def main():
     print(f"Processing  : {len(pending)}")
 
     mode = "w" if args.overwrite else "a"
-    write_header = args.overwrite or (not OUTPUT_CSV.exists()) or OUTPUT_CSV.stat().st_size == 0
+    write_header = args.overwrite or (not output_csv.exists()) or output_csv.stat().st_size == 0
 
-    OUTPUT_CSV.parent.mkdir(exist_ok=True)
-    with open(OUTPUT_CSV, mode, newline="", encoding="utf-8") as f:
+    output_csv.parent.mkdir(exist_ok=True)
+    with open(output_csv, mode, newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=FIELDS)
         if write_header:
             writer.writeheader()
@@ -319,14 +317,14 @@ def main():
             writer.writerow(out_row)
             f.flush()
 
-    with open(OUTPUT_CSV, newline="", encoding="utf-8") as f:
+    with open(output_csv, newline="", encoding="utf-8") as f:
         out_rows = list(csv.DictReader(f))
 
     total = len(out_rows)
     confirmed = sum(1 for x in out_rows if x.get("all_found_links", "").strip())
     verified = sum(1 for x in out_rows if x.get("best_link_quality", "") in ("VERIFIED", "DOI_CONFIRMED", "AUTHOR_CONFIRMED"))
 
-    print(f"\nWritten {total} rows -> {OUTPUT_CSV}")
+    print(f"\nWritten {total} rows -> {output_csv}")
     print(f"Rows with any found link       : {confirmed}")
     print(f"Rows with verified-quality link: {verified}")
 

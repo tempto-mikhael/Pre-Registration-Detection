@@ -24,6 +24,7 @@ import sys
 from collections import defaultdict
 from datetime import date
 from pathlib import Path
+from path_utils import resolve_existing_path, resolve_output_path
 
 try:
     import openpyxl
@@ -36,10 +37,12 @@ except ImportError:
 ROOT = Path(__file__).parent.parent
 OUTPUT_DIR = ROOT / "output"
 DEFAULT_SCAN = OUTPUT_DIR / "pdf_scan_results_v2.csv"
-LINKS_CSV = OUTPUT_DIR / "pdf_scan_prereg_links_dedup.csv"
-VERDICTS_CSV = OUTPUT_DIR / "llm_gemini_verdicts.csv"
-SOURCE_XLSX = ROOT / "journal_articles_with_pap_2025-03-14.xlsx"
-OUT_XLSX = OUTPUT_DIR / f"pipeline_findings_{date.today()}.xlsx"
+FALLBACK_SCAN = OUTPUT_DIR / "pdf_scan_results.csv"
+DEFAULT_LINKS_CSV = OUTPUT_DIR / "pdf_scan_prereg_links_dedup.csv"
+FALLBACK_LINKS_CSV = OUTPUT_DIR / "pdf_scan_prereg_links.csv"
+DEFAULT_VERDICTS_CSV = OUTPUT_DIR / "llm_gemini_verdicts.csv"
+DEFAULT_SOURCE_XLSX = ROOT / "journal_articles_with_pap_2025-03-14.xlsx"
+DEFAULT_OUT_XLSX = OUTPUT_DIR / f"pipeline_findings_{date.today()}.xlsx"
 
 CONFIDENCE_MAP = {"high": 0.9, "medium": 0.6, "low": 0.25}
 FINAL_ACCEPTED_LINK_QUALITIES = {
@@ -471,23 +474,61 @@ def main():
         default=None,
         help=f"Path to scan CSV (default: {DEFAULT_SCAN})",
     )
+    parser.add_argument(
+        "--links",
+        type=str,
+        default=None,
+        help=f"Path to enriched links CSV (default: {DEFAULT_LINKS_CSV})",
+    )
+    parser.add_argument(
+        "--verdicts",
+        type=str,
+        default=None,
+        help=f"Path to LLM verdict CSV (default: {DEFAULT_VERDICTS_CSV})",
+    )
+    parser.add_argument(
+        "--xlsx",
+        type=str,
+        default=None,
+        help=f"Path to reference spreadsheet (default: {DEFAULT_SOURCE_XLSX})",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help=f"Path to output workbook (default: {DEFAULT_OUT_XLSX})",
+    )
     args = parser.parse_args()
 
-    scan_csv = Path(args.scan) if args.scan else DEFAULT_SCAN
-    if not scan_csv.exists():
-        fallback = OUTPUT_DIR / "pdf_scan_results.csv"
-        if fallback.exists():
-            print(f"WARNING: {scan_csv.name} not found - falling back to {fallback.name}")
-            scan_csv = fallback
-        else:
-            sys.exit(f"ERROR: scan CSV not found: {scan_csv}")
+    scan_csv = resolve_existing_path(args.scan, DEFAULT_SCAN, "scan CSV", fallbacks=[FALLBACK_SCAN])
+    links_csv = resolve_existing_path(
+        args.links,
+        DEFAULT_LINKS_CSV,
+        "enriched links CSV",
+        fallbacks=[FALLBACK_LINKS_CSV],
+        required=False,
+    )
+    verdicts_csv = resolve_existing_path(
+        args.verdicts,
+        DEFAULT_VERDICTS_CSV,
+        "LLM verdict CSV",
+        required=False,
+    )
+    source_xlsx = resolve_existing_path(
+        args.xlsx,
+        DEFAULT_SOURCE_XLSX,
+        "reference spreadsheet",
+        required=False,
+    )
+    out_xlsx = resolve_output_path(args.output, DEFAULT_OUT_XLSX)
 
     print(f"Using scan CSV: {scan_csv.name}")
+    print(f"Using links CSV: {links_csv.name}")
 
     scan = load_csv(scan_csv)
-    links = load_csv(LINKS_CSV)
-    verdicts = load_csv(VERDICTS_CSV)
-    refs = load_reference_rows(SOURCE_XLSX)
+    links = load_csv(links_csv)
+    verdicts = load_csv(verdicts_csv)
+    refs = load_reference_rows(source_xlsx)
 
     print(f"Scan rows:     {len(scan)}")
     print(f"Link rows:     {len(links)}")
@@ -704,7 +745,7 @@ def main():
 
     out_ws.auto_filter.ref = out_ws.dimensions
     write_summary_sheets(out_wb, rows_for_summary)
-    out_wb.save(str(OUT_XLSX))
+    out_wb.save(str(out_xlsx))
 
     final_prereg_1 = sum(1 for r in rows_for_summary if r["final_prereg_decision"] == 1)
     final_link_1 = sum(1 for r in rows_for_summary if r["final_link_decision"] == 1)
@@ -718,7 +759,7 @@ def main():
     print(f"  experiment=1            : {experiment_1}")
     print(f"  prereg_inconsistent=1   : {prereg_inconsistent}")
     print(f"  link_inconsistent=1     : {link_inconsistent}")
-    print(f"  Output: {OUT_XLSX}")
+    print(f"  Output: {out_xlsx}")
 
 
 if __name__ == "__main__":
