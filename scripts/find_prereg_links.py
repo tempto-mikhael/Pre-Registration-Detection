@@ -72,15 +72,31 @@ BROWSER_HEADERS = {
 
 # ── Registry patterns ──────────────────────────────────────────────────────────
 REGISTRY_PATTERNS = [
-    re.compile(r"https?://(?:www\.)?socialscienceregistry\.org/trials/\d+", re.I),
-    re.compile(r"\bAEARCTR-\d+\b",                                           re.I),
+    re.compile(r"https?://(?:www\.)?socialscienceregistry\.org/trials/[\d ]+\d", re.I),
+    re.compile(r"\bAEARCTR-[\d ]+\d\b",                                      re.I),
     re.compile(r"https?://(?:www\.)?osf\.io/[A-Za-z0-9]{3,}",               re.I),
     re.compile(r"https?://(?:www\.)?aspredicted\.org/[A-Za-z0-9/_-]+",      re.I),
     re.compile(r"https?://(?:www\.)?clinicaltrials\.gov/\S+",                re.I),
     re.compile(r"https?://(?:www\.)?egap\.org/\S+",                         re.I),
-    re.compile(r"\bAsPredicted\s*#\s*\d+",                                   re.I),
+    re.compile(r"\bAsPredicted\s*#\s*[\d ]+\d",                              re.I),
     re.compile(r"https?://(?:www\.)?ridie\.\S+",                             re.I),
 ]
+
+# Links that are just registry homepages / generic pages (not paper-specific)
+GENERIC_LINK_PATTERNS = [
+    re.compile(r'^https?://(www\.)?aspredicted\.org/blind\s*$', re.I),
+    re.compile(r'^https?://(www\.)?aspredicted\.org/?$', re.I),
+    re.compile(r'^https?://(www\.)?egap\.org/?$', re.I),
+    re.compile(r'^https?://(www\.)?osf\.io/?$', re.I),
+    re.compile(r'^https?://(www\.)?osf\.io/(download|preprints|registries|search|meetings|institutions)\s*$', re.I),
+    re.compile(r'^https?://(www\.)?socialscienceregistry\.org/?$', re.I),
+    re.compile(r'^https?://(www\.)?socialscienceregistry\.org/trials/?$', re.I),
+    re.compile(r'^https?://(www\.)?socialscienceregistry\.org/trials/0\s*$', re.I),
+]
+
+def is_generic_link(url: str) -> bool:
+    """Return True if the URL is a generic registry homepage, not a paper-specific link."""
+    return any(p.match(url.strip()) for p in GENERIC_LINK_PATTERNS)
 
 REGISTRY_DOMAINS = [
     "socialscienceregistry.org", "osf.io", "aspredicted.org",
@@ -111,19 +127,28 @@ def unique(lst):
     return [x for x in lst if x and not (x in seen or seen.add(x))]
 
 
+def _strip_spaces(s: str) -> str:
+    """Remove spaces inserted by PDF renderers inside digit strings."""
+    return re.sub(r'(?<=\d) (?=\d)', '', s)
+
+
 def normalise(url: str) -> str:
-    """Convert bare AEARCTR-NNNNN to a full URL."""
-    if re.match(r"^AEARCTR-\d+$", url, re.I):
-        n = re.search(r"\d+", url).group()
+    """Convert bare AEARCTR-NNNNN to a full URL; strip PDF digit-spaces."""
+    clean = _strip_spaces(url)
+    if re.match(r"^AEARCTR-\d+$", clean, re.I):
+        n = int(re.search(r"\d+", clean).group())
         return f"https://www.socialscienceregistry.org/trials/{n}"
-    return url
+    if re.match(r"^AsPredicted\s*#\s*\d+$", clean, re.I):
+        n = re.search(r"\d+", clean).group()
+        return f"https://aspredicted.org/blind.php?x={n}"
+    return clean
 
 
 def extract_links(text: str) -> list:
     found = []
     for pat in REGISTRY_PATTERNS:
         found.extend(normalise(m) for m in pat.findall(text))
-    return unique(found)
+    return unique([u for u in found if not is_generic_link(u)])
 
 
 def detect_voter_fp(text: str) -> bool:
@@ -255,7 +280,13 @@ def validate_link_quality(url: str, paper_title: str, paper_doi: str = "") -> di
     quality values: VERIFIED | DOI_CONFIRMED | UNCERTAIN | TITLE_MISMATCH |
                     NO_TITLE | UNREACHABLE
     """
-    result = {"quality": "UNREACHABLE", "sim": "N/A", "doi_in_page": False, "page_text": ""}
+    result = {
+        "quality": "UNREACHABLE",
+        "sim": "N/A",
+        "doi_in_page": False,
+        "page_text": "",
+        "registry_page_title": "",
+    }
     try:
         resp = requests.get(url, headers=BROWSER_HEADERS, timeout=20, allow_redirects=True)
         if resp.status_code >= 400:
@@ -278,6 +309,7 @@ def validate_link_quality(url: str, paper_title: str, paper_doi: str = "") -> di
         else:
             soup = BeautifulSoup(html, "html.parser")
             page_title = _extract_registry_title(soup, final_url)
+        result["registry_page_title"] = page_title
         # Similarity
         if not page_title or not paper_title:
             sim, sim_str = 0.0, "N/A"

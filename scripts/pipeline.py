@@ -382,9 +382,10 @@ def auto_check(text: str) -> dict:
                                          "mturk", "prolific", "amazon turk"]) else 0
     type_survey = 1 if (regex_hit(text, [re.compile(r"\bsurvey\b", re.I)])
                         and not type_lab and not type_field and not type_online) else 0
-    type_obs    = 1 if phrase_hit(text, ["observational data", "administrative data",
-                                         "panel data", "census data",
-                                         "administrative records"]) else 0
+    type_obs    = 1 if (phrase_hit(text, ["observational data", "administrative data",
+                                          "panel data", "census data",
+                                          "administrative records"])
+                        and not type_lab and not type_field and not type_online) else 0
 
     return {
         "auto_no_data":          no_data,
