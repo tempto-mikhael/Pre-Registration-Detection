@@ -413,10 +413,10 @@ Provider helpers:
 - `clean_llm_content(content)`: removes `<think>` blocks and markdown fences from model output.
 - `openrouter_chat_completion(api_key, model, prompt, max_output_tokens, response_format_type=None)`: low-level OpenRouter request wrapper.
 
-Gemini execution:
+API Key (direct provider) execution:
 
-- `call_gemini(client, paper, max_chars)`: sends one paper to Gemini and parses a verdict.
-- `call_gemini_batch(client, papers, max_chars)`: sends multiple papers in one Gemini request and splits the results back out.
+- `call_native_provider_single(client, paper, max_chars)`: sends one paper to Gemini and parses a verdict.
+- `call_native_provider_batch(client, papers, max_chars)`: sends multiple papers in one LLM request and splits the results back out.
 
 OpenRouter execution:
 
@@ -493,52 +493,6 @@ Behavior:
 - `.gitignore` excludes `output/`, `.env`, `*.pdf`, and `*.xlsx`, so raw data and generated outputs are intentionally not pushed.
 - Some scripts still contain default filenames or path constants that reflect the original development setup. Those defaults can be replaced with any equivalent workbook or PDF collection that matches the expected structure.
 
-## How To Push Only The Current Content To GitHub
 
-If your local repo is already linked to a remote, run these commands from the repository root:
 
-```powershell
-git status
-git add -A
-git status
-git commit -m "Update project documentation and current scripts"
-git push origin HEAD
-```
 
-Why `git add -A` matters:
-
-- It stages modified files.
-- It stages new files.
-- It stages deletions.
-- It still does not add ignored files like `.env`, `output/`, PDFs, or XLSX files.
-
-If you want one extra safety check before committing, use:
-
-```powershell
-git diff --cached --stat
-git diff --cached
-```
-
-If Git says there is nothing to commit, that means your local branch already matches the last commit.
-
-If this is the first time pushing this local branch name, use:
-
-```powershell
-git push -u origin HEAD
-```
-
-If you want to push only part of the current work instead of everything visible in `git status`, do not use `git add -A`. Stage specific files instead, for example:
-
-```powershell
-git add README.md scripts\find_prereg_links.py
-git commit -m "Update README and link search logic"
-git push origin HEAD
-```
-
-## Minimal Safe Push Checklist
-
-1. Run `git status` and confirm the file list is what you expect.
-2. Run `git add -A` if you want the full current repo state.
-3. Run `git diff --cached --stat` to confirm what will be committed.
-4. Commit once.
-5. Push to your linked remote branch.
