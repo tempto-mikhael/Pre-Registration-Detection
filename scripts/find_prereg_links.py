@@ -828,6 +828,7 @@ FIELDS = [
     "osf_title_links",
     "all_found_links",
     "best_link_quality",
+    "best_link_title",
     "best_link_sim",
     "author_check",
     "verdict",
@@ -928,12 +929,14 @@ def main():
 
         # ── Improvement 2: validate quality of best found link ────────────────
         best_lq   = ""
+        best_title = ""
         best_sim  = ""
         author_chk = ""
         if all_links:
             best_candidate = all_links[0]
             lq = validate_link_quality(best_candidate, title, doi)
             best_lq  = lq["quality"]
+            best_title = lq.get("registry_page_title", "")
             best_sim = lq["sim"]
             print(f"  link quality: {best_lq} | sim={best_sim}")
 
@@ -997,6 +1000,7 @@ def main():
             "osf_title_links":     "; ".join(osf_title_links),
             "all_found_links":     "; ".join(all_links),
             "best_link_quality":   best_lq,
+            "best_link_title":     best_title,
             "best_link_sim":       best_sim,
             "author_check":        author_chk,
             "verdict":             vrd,

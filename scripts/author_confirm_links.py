@@ -22,6 +22,7 @@ Usage:
 
 import argparse
 import csv
+from difflib import SequenceMatcher
 import sys
 import time
 from pathlib import Path
@@ -42,6 +43,39 @@ FALLBACK_ENRICHED_CSV = PROJECT_ROOT / "output" / "pdf_scan_prereg_links.csv"
 
 CANDIDATES = {"UNCERTAIN", "TITLE_MISMATCH", "NO_TITLE"}
 AUTHOR_MATCH_THRESHOLD = 0.50
+
+
+def normalized_title(text: str | None) -> str:
+    title = (text or "").lower()
+    title = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in title)
+    return " ".join(title.split())
+
+
+def prefer_longer_matching_title(current: str | None, candidate: str | None) -> str | None:
+    if not candidate:
+        return current
+    if not current:
+        return candidate
+
+    cur_norm = normalized_title(current)
+    cand_norm = normalized_title(candidate)
+    if not cur_norm or not cand_norm:
+        return current
+
+    if cur_norm == cand_norm:
+        return candidate if len(candidate) > len(current) else current
+    shorter, longer = sorted((cur_norm, cand_norm), key=len)
+    boundary_extension = (
+        longer.startswith(shorter + " ")
+        or longer.endswith(" " + shorter)
+        or shorter.startswith(longer + " ")
+        or shorter.endswith(" " + longer)
+    )
+    if boundary_extension and (len(shorter) / len(longer)) >= 0.55:
+        return candidate if len(candidate) > len(current) else current
+    if SequenceMatcher(None, cur_norm, cand_norm).ratio() >= 0.92:
+        return candidate if len(candidate) > len(current) else current
+    return current
 
 
 def main():
@@ -74,6 +108,8 @@ def main():
         orig_fields.append("author_match")
     if "author_checked" not in orig_fields:
         orig_fields.append("author_checked")
+    if "best_link_title" not in orig_fields:
+        orig_fields.append("best_link_title")
 
     # Ensure all rows have the new fields
     for r in rows:
@@ -116,6 +152,10 @@ def main():
         # Re-fetch registry page to get page_text
         lq = validate_link_quality(url, title, doi)
         page_text = lq.get("page_text", "")
+        r["best_link_title"] = prefer_longer_matching_title(
+            r.get("best_link_title", ""),
+            lq.get("registry_page_title", ""),
+        ) or ""
         time.sleep(args.delay * 0.4)
 
         if not page_text:

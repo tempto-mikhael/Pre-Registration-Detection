@@ -84,6 +84,19 @@ FIELDS = [
     "verdict",
 ]
 
+QUALITY_RANK = {
+    "AUTHOR_CONFIRMED": 6,
+    "DOI_CONFIRMED": 5,
+    "VERIFIED": 4,
+    "AI_LINK_CONFIRMED": 3,
+    "UNCERTAIN": 2,
+    "NO_TITLE": 1,
+    "TITLE_MISMATCH": 1,
+    "UNREACHABLE": 0,
+    "ai": 0,
+    "": 0,
+}
+
 
 def parse_existing_links(raw: str) -> list[str]:
     if not raw:
@@ -142,6 +155,41 @@ def extract_doi_from_text(text: str) -> str:
     if not m:
         return ""
     return clean_doi(m.group(0))
+
+
+def best_link_metadata(links: list[str], paper_title: str, paper_doi: str) -> tuple[list[str], str, str, str]:
+    """Validate candidate links and move the strongest one to the front.
+
+    We only re-check a small prefix of links because the enrichment step already
+    performs many outbound requests. This is enough to stabilize downstream
+    title propagation and final-link selection.
+    """
+    if not links:
+        return links, "", "", ""
+
+    scored = []
+    for pos, url in enumerate(links[:5]):
+        lq = validate_link_quality(url, paper_title, paper_doi)
+        sim_text = str(lq.get("sim", "") or "").strip()
+        try:
+            sim_num = float(sim_text)
+        except ValueError:
+            sim_num = -1.0
+        title = (lq.get("registry_page_title") or "").strip()
+        score = (QUALITY_RANK.get(lq.get("quality", ""), 0), sim_num, len(title), -pos)
+        scored.append((score, url, lq))
+
+    if not scored:
+        return links, "", "", ""
+
+    _, best_url, best_lq = max(scored, key=lambda item: item[0])
+    reordered = [best_url] + [url for url in links if url != best_url]
+    return (
+        reordered,
+        best_lq.get("quality", "") or "",
+        (best_lq.get("registry_page_title") or "").strip(),
+        str(best_lq.get("sim", "") or "").strip(),
+    )
 
 
 def load_done_pdf_paths(csv_path: Path) -> set[str]:
@@ -281,10 +329,7 @@ def main():
             best_title = ""
             best_sim = ""
             if all_links:
-                lq = validate_link_quality(all_links[0], title, doi)
-                best_quality = lq.get("quality", "")
-                best_title = lq.get("registry_page_title", "")
-                best_sim = lq.get("sim", "")
+                all_links, best_quality, best_title, best_sim = best_link_metadata(all_links, title, doi)
 
             verdict = get_verdict(all_links, voter_fp, rich_text)
 

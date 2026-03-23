@@ -88,6 +88,13 @@ The code is not limited to one specific spreadsheet or one specific PDF collecti
 - `output/comparison_report.csv`: side-by-side comparison of automated results and spreadsheet labels.
 - `output/findings_*.xlsx` and `output/pipeline_findings_*.xlsx`: reporting workbooks.
 
+## Recent Improvements
+
+- Later-found registry links now backfill platform flags such as `auto_use_osf`, so final workbook columns stay aligned with enrichment and AI-discovered links.
+- Title propagation is safer: validated registry titles are preserved when useful, but the workbook avoids replacing a paper title with an unrelated longer registry title.
+- Deduplication now preserves the strongest validated link first, which makes downstream title selection and final-link decisions more stable.
+- Pipeline findings workbooks now include clearer comparison columns such as `final_link_decision`, `final_prereg_decision`, `prereg_inconsistent`, `link_inconsistent`, and `experiment`.
+
 ## Suggested End-To-End Runs
 
 Spreadsheet-first:

@@ -249,12 +249,13 @@ def main():
         rows = list(reader)
 
     # Add new columns if missing
-    for col in ("ai_link_check", "ai_link_reasoning"):
+    for col in ("ai_link_check", "ai_link_reasoning", "best_link_title"):
         if col not in orig_fields:
             orig_fields.append(col)
     for r in rows:
         r.setdefault("ai_link_check", "")
         r.setdefault("ai_link_reasoning", "")
+        r.setdefault("best_link_title", "")
 
     # Select candidates: NO_TITLE or AI_LINK_REJECTED rows with links & pdf_path
     # Skip rows already confirmed or rejected (unless --overwrite)

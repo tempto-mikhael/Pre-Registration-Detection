@@ -113,10 +113,14 @@ def main():
     deduped_rows = []
     for key in sorted(grouped):
         group = grouped[key]
-        best = dict(choose_best_row(group))
+        best_row = choose_best_row(group)
+        best = dict(best_row)
+        preferred_group = [best_row] + [row for row in group if row is not best_row]
         for field in MULTI_VALUE_FIELDS:
             if field in best:
-                best[field] = merge_multi(group, field)
+                # Preserve the best row's link ordering first so downstream
+                # scripts keep the strongest candidate at the front.
+                best[field] = merge_multi(preferred_group, field)
         best["filename"] = (best.get("filename") or key).strip()
         best["dedup_row_count"] = len(group)
         deduped_rows.append(best)
