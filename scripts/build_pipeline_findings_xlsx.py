@@ -34,15 +34,12 @@ except ImportError:
 ROOT = Path(__file__).parent.parent
 OUTPUT_DIR = ROOT / "output"
 DEFAULT_SCAN = OUTPUT_DIR / "pdf_scan_results.csv"
-FALLBACK_SCAN = OUTPUT_DIR / "pdf_scan_results_v2.csv"
 DEFAULT_LINKS_CSV = OUTPUT_DIR / "pdf_scan_prereg_links_dedup.csv"
 FALLBACK_LINKS_CSV = OUTPUT_DIR / "pdf_scan_prereg_links.csv"
 DEFAULT_VERDICTS_CSV = OUTPUT_DIR / "llm_verdicts.csv"
-FALLBACK_VERDICTS_CSV = OUTPUT_DIR / "llm_gemini_verdicts.csv"
 DEFAULT_OUT_XLSX = OUTPUT_DIR / "results.xlsx"
 DEFAULT_OUT_CSV = OUTPUT_DIR / "results.csv"
 
-LEGACY_CONFIDENCE_MAP = {"high": 0.9, "medium": 0.6, "low": 0.25}
 FINAL_ACCEPTED_LINK_QUALITIES = {"VERIFIED", "DOI_CONFIRMED", "AUTHOR_CONFIRMED", "AI_LINK_CONFIRMED"}
 CAUTIOUS_LINK_DOMAINS = {"osf.io", "clinicaltrials.gov"}
 TRUST_DIRECT_PDF_LINK_DOMAINS = {"aspredicted.org"}
@@ -168,9 +165,6 @@ def parse_confidence_value(val):
     text = str(val).strip().lower()
     if not text or text == "error":
         return None
-    legacy = LEGACY_CONFIDENCE_MAP.get(text)
-    if legacy is not None:
-        return legacy
     try:
         return max(0.0, min(1.0, float(text)))
     except ValueError:
@@ -313,27 +307,6 @@ def ai_supports_prereg_without_link(ai_prereg_bool, ai_evidence, ai_reasoning, a
     return any(re.search(pattern, combined, re.I | re.DOTALL) for pattern in strong_patterns)
 
 
-def derive_default_ai_fields(auto_prereg, auto_link_prereg, all_found_links, best_link_quality):
-    """Fill AI columns for papers that never entered AI review.
-
-    The common case is a clear pipeline negative: no prereg keyword hit and no
-    candidate registry link. In that case we prefer explicit negative AI fields
-    over blanks in the final results output.
-    """
-    has_links = bool(clean_text_or_none(auto_link_prereg) or clean_text_or_none(all_found_links))
-    quality = clean_text_or_none(best_link_quality)
-    if int_or_none(auto_prereg) == 0 and not has_links and not quality:
-        return {
-            "ai_prereg_bool": False,
-            "ai_prereg": "False",
-            "ai_confidence": 0.99,
-            "ai_evidence": "No prereg keyword hit or candidate registry link required AI review.",
-            "ai_reasoning": "This paper did not enter the AI review groups because the pipeline found no preregistration trigger.",
-            "ai_evidence_location": None,
-        }
-    return None
-
-
 def maybe_fetch_registry_title(current_title, candidate_url, paper_title, paper_doi, best_quality, cache):
     if current_title or not candidate_url:
         return current_title
@@ -446,15 +419,9 @@ def main():
     parser.add_argument("--output-csv", type=str, default=None, help=f"Path to output CSV (default: {DEFAULT_OUT_CSV})")
     args = parser.parse_args()
 
-    scan_csv = resolve_existing_path(args.scan, DEFAULT_SCAN, "scan CSV", fallbacks=[FALLBACK_SCAN])
+    scan_csv = resolve_existing_path(args.scan, DEFAULT_SCAN, "scan CSV")
     links_csv = resolve_existing_path(args.links, DEFAULT_LINKS_CSV, "enriched links CSV", fallbacks=[FALLBACK_LINKS_CSV], required=False)
-    verdicts_csv = resolve_existing_path(
-        args.verdicts,
-        DEFAULT_VERDICTS_CSV,
-        "LLM verdict CSV",
-        fallbacks=[FALLBACK_VERDICTS_CSV],
-        required=False,
-    )
+    verdicts_csv = resolve_existing_path(args.verdicts, DEFAULT_VERDICTS_CSV, "LLM verdict CSV")
     out_xlsx = resolve_output_path(args.output_xlsx, DEFAULT_OUT_XLSX)
     out_csv = resolve_output_path(args.output_csv, DEFAULT_OUT_CSV)
 
@@ -510,16 +477,6 @@ def main():
         ai_registry_url = clean_text_or_none(verdict_row.get("llm_registry_url"))
         ai_reasoning = clean_text_or_none(verdict_row.get("llm_reasoning"))
         ai_evidence_location = extract_evidence_location(ai_evidence, ai_reasoning)
-
-        if not verdict_row:
-            default_ai = derive_default_ai_fields(auto_prereg, auto_link_prereg, all_found_links, best_link_quality)
-            if default_ai:
-                ai_prereg_bool = default_ai["ai_prereg_bool"]
-                ai_prereg = default_ai["ai_prereg"]
-                ai_confidence = default_ai["ai_confidence"]
-                ai_evidence = default_ai["ai_evidence"]
-                ai_reasoning = default_ai["ai_reasoning"]
-                ai_evidence_location = default_ai["ai_evidence_location"]
 
         if ai_registry_url and not all_found_links:
             all_found_links = ai_registry_url
@@ -602,20 +559,6 @@ def main():
             "final_prereg_decision": final_prereg_decision,
             "final_prereg_source": final_prereg_source,
         }
-
-        if row_dict["ai_prereg"] in (None, "") and row_dict["ai_confidence"] in (None, ""):
-            default_ai = derive_default_ai_fields(
-                row_dict["auto_prereg"],
-                row_dict["auto_link_prereg"],
-                row_dict["all_found_links"],
-                row_dict["best_link_quality"],
-            )
-            if default_ai:
-                row_dict["ai_prereg"] = default_ai["ai_prereg"]
-                row_dict["ai_confidence"] = default_ai["ai_confidence"]
-                row_dict["ai_evidence"] = default_ai["ai_evidence"]
-                row_dict["ai_reasoning"] = default_ai["ai_reasoning"]
-                row_dict["ai_evidence_location"] = default_ai["ai_evidence_location"]
 
         out_ws.append([row_dict[name] for name, _, _ in COLUMNS])
         rows_for_summary.append(row_dict)

@@ -1,10 +1,11 @@
 """
 find_prereg_links.py
 --------------------
-Enrichment pass for papers detected as auto_prereg=1 in results.csv.
+Standalone registry-link enrichment utility for PDF scan outputs.
 
-Since pre-registration links are rarely embedded in journal PDFs, this script
-searches alternative sources for the actual registry URL:
+This script is not the main pipeline entrypoint; `enrich_pdf_scan_links.py`
+reuses its source-check functions directly. When run standalone, it reads a
+PDF-scan CSV and searches alternative sources for registry URLs:
 
   0. Cached PDF text     — re-scan downloaded OA PDFs for registry URLs.
   1. CrossRef metadata   — checks the `relation` field + references[].
@@ -26,12 +27,12 @@ After link discovery, each output row is enriched with:
                          registry page title
   • author_check       — CrossRef author overlap detail for uncertain links
 
+Input:  output/pdf_scan_results.csv
 Output: output/preregfind.csv
 
 Usage:
-  python scripts/find_prereg_links.py [--all] [--delay 1.0]
+  python scripts/find_prereg_links.py [--delay 1.0]
 
-  --all    : include already-confirmed xlsx_prereg=1 rows too
   --delay  : seconds between requests per source (default: 1.0)
 """
 
@@ -53,7 +54,7 @@ from path_utils import resolve_existing_path, resolve_output_path
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).parent.parent
-DEFAULT_RESULTS_CSV = PROJECT_ROOT / "output" / "results.csv"
+DEFAULT_SCAN_CSV = PROJECT_ROOT / "output" / "pdf_scan_results.csv"
 DEFAULT_OUTPUT_CSV = PROJECT_ROOT / "output" / "preregfind.csv"
 DEFAULT_OA_PDFS_DIR = PROJECT_ROOT / "output" / "oa_pdfs"
 OA_PDFS_DIR = DEFAULT_OA_PDFS_DIR
@@ -828,8 +829,7 @@ def get_verdict(all_links: list, voter_fp: bool, text: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 FIELDS = [
-    "row_num", "journal", "title", "doi", "pub_year",
-    "xlsx_prereg", "xlsx_link_prereg",
+    "filename", "pdf_path", "journal", "title", "doi",
     "text_source",
     "triggered_by",
     "voter_fp_signal",
@@ -860,45 +860,40 @@ FIELDS = [
 
 def main():
     ap = argparse.ArgumentParser(description="Find pre-registration links for auto_prereg=1 rows")
-    ap.add_argument("--all",   action="store_true", help="Include xlsx_prereg=1 rows too")
     ap.add_argument("--delay", type=float, default=1.0)
-    ap.add_argument("--results", type=str, default=None,
-                    help=f"Path to pipeline results CSV (default: {DEFAULT_RESULTS_CSV})")
+    ap.add_argument("--scan", type=str, default=None,
+                    help=f"Path to scan CSV (default: {DEFAULT_SCAN_CSV})")
     ap.add_argument("--output", type=str, default=None,
                     help=f"Path to output CSV (default: {DEFAULT_OUTPUT_CSV})")
     ap.add_argument("--oa-pdfs-dir", type=str, default=None,
                     help=f"Directory of cached PDFs (default: {DEFAULT_OA_PDFS_DIR})")
     args = ap.parse_args()
 
-    results_csv = resolve_existing_path(args.results, DEFAULT_RESULTS_CSV, "results CSV")
+    scan_csv = resolve_existing_path(args.scan, DEFAULT_SCAN_CSV, "scan CSV")
     output_csv = resolve_output_path(args.output, DEFAULT_OUTPUT_CSV)
 
     global OA_PDFS_DIR
     OA_PDFS_DIR = Path(args.oa_pdfs_dir) if args.oa_pdfs_dir else DEFAULT_OA_PDFS_DIR
 
-    with open(results_csv, newline="", encoding="utf-8") as f:
+    with open(scan_csv, newline="", encoding="utf-8") as f:
         all_rows = list(csv.DictReader(f))
 
     detections = [r for r in all_rows if str(r.get("auto_prereg", "")).strip() == "1"]
-    if not args.all:
-        detections = [r for r in detections if str(r.get("xlsx_prereg", "")).strip() != "1"]
 
-    print(f"Results file : {results_csv}  ({len(all_rows)} total rows)")
-    print(f"Detections   : {len(detections)} (auto_prereg=1"
-          + (", new only)" if not args.all else ", all)"))
+    print(f"Scan file    : {scan_csv}  ({len(all_rows)} total rows)")
+    print(f"Detections   : {len(detections)} (auto_prereg=1)")
     print()
 
     out_rows = []
     for i, r in enumerate(detections, 1):
         doi   = r.get("doi", "") or ""
-        title = (r.get("title_fetched") or r.get("title_xlsx") or "")
-        abstr = r.get("abstract", "") or ""
+        title = (r.get("title") or "").strip()
 
-        print(f"[{i}/{len(detections)}] row {r['row_num']} — {title[:65]}")
+        print(f"[{i}/{len(detections)}] {r.get('filename', '')} — {title[:65]}")
 
         text_source = r.get("text_source", "") or ""
         pipe_lnk    = r.get("auto_link_prereg", "") or ""
-        pdf_fname   = r.get("pdf_filename", "") or ""
+        pdf_fname   = r.get("filename", "") or ""
 
         # GAP 1: always scan cached PDF first (most impactful for full_pdf detections)
         print(f"  [0/9] Cached PDF...")
@@ -906,10 +901,9 @@ def main():
         time.sleep(0)
 
         # Determine the best text for voter/kw analysis:
-        # prefer PDF text when available, else fall back to abstract
-        rich_text = pdf_text if pdf_text else abstr
+        rich_text = pdf_text
         voter_fp  = detect_voter_fp(rich_text)
-        kws       = triggered_keywords(rich_text) if rich_text else triggered_keywords(abstr)
+        kws       = triggered_keywords(rich_text)
 
         print(f"  [1/9] CrossRef...")
         cr_links = check_crossref(doi);    time.sleep(args.delay * 0.4)
@@ -995,13 +989,11 @@ def main():
         print()
 
         out_rows.append({
-            "row_num":              r["row_num"],
+            "filename":             r.get("filename", ""),
+            "pdf_path":             r.get("pdf_path", ""),
             "journal":              r.get("journal", ""),
             "title":               title,
             "doi":                 doi,
-            "pub_year":            r.get("pub_year", ""),
-            "xlsx_prereg":         r.get("xlsx_prereg", ""),
-            "xlsx_link_prereg":    r.get("xlsx_link_prereg", ""),
             "text_source":         text_source,
             "triggered_by":        kws,
             "voter_fp_signal":     int(voter_fp),

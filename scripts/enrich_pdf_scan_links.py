@@ -52,7 +52,6 @@ from find_prereg_links import (
 
 PROJECT_ROOT = Path(__file__).parent.parent
 DEFAULT_INPUT_CSV = PROJECT_ROOT / "output" / "pdf_scan_results.csv"
-FALLBACK_INPUT_CSV = PROJECT_ROOT / "output" / "pdf_scan_results_v2.csv"
 DEFAULT_OUTPUT_CSV = PROJECT_ROOT / "output" / "pdf_scan_prereg_links.csv"
 
 DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Za-z0-9]+\b")
@@ -220,12 +219,7 @@ def main():
                     help="Overwrite output CSV instead of resuming append mode")
     args = ap.parse_args()
 
-    input_csv = resolve_existing_path(
-        args.scan,
-        DEFAULT_INPUT_CSV,
-        "scan CSV",
-        fallbacks=[FALLBACK_INPUT_CSV],
-    )
+    input_csv = resolve_existing_path(args.scan, DEFAULT_INPUT_CSV, "scan CSV")
     output_csv = resolve_output_path(args.output, DEFAULT_OUTPUT_CSV)
 
     with open(input_csv, newline="", encoding="utf-8") as f:

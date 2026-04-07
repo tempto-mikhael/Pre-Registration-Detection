@@ -2,13 +2,13 @@
 """
 LLM verification of pre-registration detection using pluggable providers.
 
-Sends each ambiguous paper's text to an LLM provider (Gemini/OpenRouter)
+Sends each paper's text to an LLM provider (Gemini/OpenRouter)
 and asks whether the paper reports its OWN pre-registration.
 Resumable, rate-limited, outputs CSV.
 
-Two pipeline groups:
-  A – keyword-only hits (scanner found prereg wording but no registry link)
-  C – link-backed candidates (scanner or enrichment found a registry link)
+Internal review groups:
+  A - text review for papers without candidate registry links
+  C - link review for papers with candidate registry links
 
 Usage:
     # Set your API key first:
@@ -50,7 +50,6 @@ except ImportError:
 ROOT = Path(__file__).parent.parent
 OUTPUT_DIR = ROOT / "output"
 DEFAULT_SCAN_CSV = OUTPUT_DIR / "pdf_scan_results.csv"
-FALLBACK_SCAN_CSV = OUTPUT_DIR / "pdf_scan_results_v2.csv"
 DEFAULT_ENRICHED_CSV = OUTPUT_DIR / "pdf_scan_prereg_links_dedup.csv"
 FALLBACK_ENRICHED_CSV = OUTPUT_DIR / "pdf_scan_prereg_links.csv"
 DEFAULT_RESULTS_CSV = OUTPUT_DIR / "llm_verdicts.csv"
@@ -140,7 +139,6 @@ DEFAULT_OPENROUTER_FREE_MODELS = [
 OPENROUTER_TRANSIENT_WAIT_BASE = 45
 OPENROUTER_TRANSIENT_WAIT_MAX = 300
 OPENROUTER_ROTATION_WAIT_SECONDS = 25
-LEGACY_CONFIDENCE_MAP = {"high": 0.9, "medium": 0.6, "low": 0.25}
 
 
 def load_env_file(env_path: Path):
@@ -211,7 +209,7 @@ Always respond with ONLY a JSON object (no markdown fences, no extra text):
 {
   "prereg": true or false,
   "confidence": number between 0.00 and 1.00,
-  "evidence": "brief quote or description of the evidence (max 150 chars)",
+  "evidence": "brief quote or description of the key evidence",
   "registry_url": "URL if found, else null",
   "reasoning": "1-2 sentence explanation of your decision"
 }"""
@@ -316,7 +314,7 @@ fences, no extra text). Each object must be in order matching the paper index:
     "paper_index": 1,
     "prereg": true or false,
     "confidence": number between 0.00 and 1.00,
-    "evidence": "brief quote or description (max 150 chars)",
+    "evidence": "brief quote or description of the key evidence",
     "registry_url": "URL if found, else null",
     "reasoning": "1-2 sentence explanation"
   }},
@@ -408,6 +406,59 @@ def _snippet_around(text: str, start: int, end: int, radius: int = 180) -> str:
     return " ".join(text[lo:hi].split())
 
 
+def _clean_evidence_text(text: str) -> str:
+    cleaned = text or ""
+    # Repair PDF line-break hyphenation like "observ- able" -> "observable"
+    cleaned = re.sub(r"(?<=\w)-\s+(?=\w)", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
+
+
+def _sentence_spans(text: str) -> list[tuple[int, int]]:
+    spans = []
+    start = 0
+    for match in re.finditer(r"(?<=[\.\?!])\s+|\n{2,}", text):
+        end = match.start()
+        if end > start:
+            spans.append((start, end))
+        start = match.end()
+    if start < len(text):
+        spans.append((start, len(text)))
+    return spans
+
+
+def _evidence_block_around(text: str, start: int, end: int, target_chars: int = 420) -> str:
+    spans = _sentence_spans(text)
+    if not spans:
+        return _clean_evidence_text(_snippet_around(text, start, end, radius=260))
+
+    idx = 0
+    for i, (lo, hi) in enumerate(spans):
+        if lo <= start < hi or lo < end <= hi or (start <= lo and hi <= end):
+            idx = i
+            break
+    left = idx
+    right = idx
+
+    candidate = _clean_evidence_text(text[spans[left][0]:spans[right][1]])
+    while len(candidate) < target_chars and (left > 0 or right < len(spans) - 1):
+        expanded = False
+        if right < len(spans) - 1:
+            right += 1
+            expanded = True
+        candidate = _clean_evidence_text(text[spans[left][0]:spans[right][1]])
+        if len(candidate) >= target_chars:
+            break
+        if left > 0:
+            left -= 1
+            expanded = True
+        candidate = _clean_evidence_text(text[spans[left][0]:spans[right][1]])
+        if not expanded:
+            break
+
+    return candidate
+
+
 def detect_direct_prereg_signal(text: str, extra_links: list[str] | None = None) -> dict:
     raw = text or ""
     normalised = normalise_registry_text(raw)
@@ -423,11 +474,11 @@ def detect_direct_prereg_signal(text: str, extra_links: list[str] | None = None)
     blind_links = [link for link in links if "aspredicted.org/blind.php?x=" in link.lower()]
     if blind_links:
         pattern = re.search(r"aspredicted\.org/blind(?:\.php)?\?x=[a-z0-9]+", normalised, flags=re.IGNORECASE)
-        snippet = _snippet_around(normalised, pattern.start(), pattern.end()) if pattern else "Blind AsPredicted preregistration link cited in paper text."
+        snippet = _evidence_block_around(normalised, pattern.start(), pattern.end()) if pattern else "Blind AsPredicted preregistration link cited in paper text."
         return {
             "matched": True,
             "rule": "blind_aspredicted_text_link",
-            "evidence": snippet[:220],
+            "evidence": snippet,
             "registry_url": blind_links[0],
         }
 
@@ -438,7 +489,7 @@ def detect_direct_prereg_signal(text: str, extra_links: list[str] | None = None)
         return {
             "matched": True,
             "rule": "explicit_text_prereg_statement",
-            "evidence": _snippet_around(normalised, match.start(), match.end())[:220],
+            "evidence": _evidence_block_around(normalised, match.start(), match.end()),
             "registry_url": links[0] if links else "",
         }
 
@@ -885,7 +936,7 @@ def deterministic_pipeline_verdict(paper: dict, max_chars: int) -> dict | None:
             "journal": paper["journal"],
             "llm_prereg": True,
             "llm_confidence": "0.98",
-            "llm_evidence": (direct.get("evidence") or "Paper text explicitly reports preregistration.")[:150],
+            "llm_evidence": direct.get("evidence") or "Paper text explicitly reports preregistration.",
             "llm_registry_url": best_link or direct.get("registry_url") or "",
             "llm_reasoning": (
                 "The paper text contains a direct own-study preregistration disclosure, so this "
@@ -917,7 +968,7 @@ def deterministic_pipeline_verdict(paper: dict, max_chars: int) -> dict | None:
                     f" with author overlap {evidence.get('author_match')}"
                     if evidence.get("author_match") else ""
                 )
-            )[:150],
+            ),
             "llm_registry_url": best_link,
             "llm_reasoning": (
                 "The strongest available registry record matches this paper closely enough to count "
@@ -952,7 +1003,7 @@ def is_rate_limited_message(message: str) -> bool:
 
 
 def normalize_confidence_value(value) -> str:
-    """Normalize model confidence to a 0.00-1.00 string, keeping legacy support."""
+    """Normalize model confidence to a 0.00-1.00 string."""
     if value is None:
         return ""
     if isinstance(value, bool):
@@ -965,10 +1016,6 @@ def normalize_confidence_value(value) -> str:
         return ""
     if text.lower() == "error":
         return "error"
-
-    legacy = LEGACY_CONFIDENCE_MAP.get(text.lower())
-    if legacy is not None:
-        return f"{legacy:.2f}"
 
     try:
         return f"{max(0.0, min(1.0, float(text))):.2f}"
@@ -1685,14 +1732,18 @@ def print_summary(results_csv: Path):
     for g in sorted(by_group):
         s = by_group[g]
         gt = s["yes"] + s["no"] + s["error"]
-        print(f"\n  Group {g} ({gt} papers):")
+        label = {
+            "A": "Text-only review",
+            "C": "Candidate-link review",
+        }.get(g, f"Group {g}")
+        print(f"\n  {label} ({gt} papers):")
         print(f"    LLM says pre-registered  : {s['yes']}")
         print(f"    LLM says NOT pre-registered: {s['no']}")
         print(f"    Errors                   : {s['error']}")
         if gt and g == "A":
             print(f"    -> {s['yes']}/{gt} text-only papers confirmed ({s['yes']/gt:.1%})")
         elif gt and g == "C":
-            print(f"    -> {s['yes']}/{gt} link-backed candidates confirmed ({s['yes']/gt:.1%})")
+            print(f"    -> {s['yes']}/{gt} candidate-link papers confirmed ({s['yes']/gt:.1%})")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -1700,7 +1751,7 @@ def print_summary(results_csv: Path):
 def main():
     parser = argparse.ArgumentParser(description="Review pipeline preregistration candidates via LLM API")
     parser.add_argument("--group", action="append", default=[],
-                        help="Groups to process: A (text-only/no candidate link), C (link-backed), or all")
+                        help="Groups to process: A (text-only/no candidate link), C (candidate registry links), or all")
     parser.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS,
                         help="Max chars of PDF text to send (0 = full PDF, default 0)")
     parser.add_argument("--provider", choices=["gemini", "openrouter"], default=DEFAULT_PROVIDER,
@@ -1727,7 +1778,7 @@ def main():
 
     load_env_file(ROOT / ".env")
 
-    scan_csv = resolve_existing_path(args.scan, DEFAULT_SCAN_CSV, "scan CSV", fallbacks=[FALLBACK_SCAN_CSV])
+    scan_csv = resolve_existing_path(args.scan, DEFAULT_SCAN_CSV, "scan CSV")
     enriched_csv = resolve_existing_path(
         args.enriched,
         DEFAULT_ENRICHED_CSV,
