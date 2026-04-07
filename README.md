@@ -142,7 +142,7 @@ IMPORTANT DISTINCTIONS:
 Always respond with ONLY a JSON object (no markdown fences, no extra text):
 {
   "prereg": true or false,
-  "confidence": "high" or "medium" or "low",
+  "confidence": number between 0.00 and 1.00,
   "evidence": "brief quote or description of the evidence (max 150 chars)",
   "registry_url": "URL if found, else null",
   "reasoning": "1-2 sentence explanation of your decision"

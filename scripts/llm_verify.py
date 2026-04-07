@@ -140,6 +140,7 @@ DEFAULT_OPENROUTER_FREE_MODELS = [
 OPENROUTER_TRANSIENT_WAIT_BASE = 45
 OPENROUTER_TRANSIENT_WAIT_MAX = 300
 OPENROUTER_ROTATION_WAIT_SECONDS = 25
+LEGACY_CONFIDENCE_MAP = {"high": 0.9, "medium": 0.6, "low": 0.25}
 
 
 def load_env_file(env_path: Path):
@@ -209,7 +210,7 @@ IMPORTANT DISTINCTIONS:
 Always respond with ONLY a JSON object (no markdown fences, no extra text):
 {
   "prereg": true or false,
-  "confidence": "high" or "medium" or "low",
+  "confidence": number between 0.00 and 1.00,
   "evidence": "brief quote or description of the evidence (max 150 chars)",
   "registry_url": "URL if found, else null",
   "reasoning": "1-2 sentence explanation of your decision"
@@ -314,7 +315,7 @@ fences, no extra text). Each object must be in order matching the paper index:
   {{
     "paper_index": 1,
     "prereg": true or false,
-    "confidence": "high" or "medium" or "low",
+    "confidence": number between 0.00 and 1.00,
     "evidence": "brief quote or description (max 150 chars)",
     "registry_url": "URL if found, else null",
     "reasoning": "1-2 sentence explanation"
@@ -800,14 +801,12 @@ def build_groups(scan, enriched, requested_groups, done_filenames=None):
         for fname, s in scan.items():
             if fname in done_already:
                 continue
-            if str(s.get("auto_prereg", "")).strip() != "1":
-                continue
             if not s.get("pdf_path"):
                 continue
-            if (s.get("auto_link_prereg") or "").strip():
-                continue
             e = enriched.get(fname, {})
-            if (e.get("all_found_links") or "").strip():
+            has_pdf_link = bool((s.get("auto_link_prereg") or "").strip())
+            has_enriched_links = bool((e.get("all_found_links") or "").strip())
+            if has_pdf_link or has_enriched_links:
                 continue
             papers.append({
                 "filename": fname,
@@ -885,7 +884,7 @@ def deterministic_pipeline_verdict(paper: dict, max_chars: int) -> dict | None:
             "filename": paper["filename"],
             "journal": paper["journal"],
             "llm_prereg": True,
-            "llm_confidence": "high",
+            "llm_confidence": "0.98",
             "llm_evidence": (direct.get("evidence") or "Paper text explicitly reports preregistration.")[:150],
             "llm_registry_url": best_link or direct.get("registry_url") or "",
             "llm_reasoning": (
@@ -911,7 +910,7 @@ def deterministic_pipeline_verdict(paper: dict, max_chars: int) -> dict | None:
             "filename": paper["filename"],
             "journal": paper["journal"],
             "llm_prereg": True,
-            "llm_confidence": "high" if quality in {"VERIFIED", "DOI_CONFIRMED"} else "medium",
+            "llm_confidence": "0.93" if quality in {"VERIFIED", "DOI_CONFIRMED"} else "0.80",
             "llm_evidence": (
                 f"Registry evidence is {quality}"
                 + (
@@ -950,6 +949,31 @@ def is_rate_limited_message(message: str) -> bool:
         or "quota" in msg
         or "too many requests" in msg
     )
+
+
+def normalize_confidence_value(value) -> str:
+    """Normalize model confidence to a 0.00-1.00 string, keeping legacy support."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return ""
+    if isinstance(value, (int, float)):
+        return f"{max(0.0, min(1.0, float(value))):.2f}"
+
+    text = str(value).strip()
+    if not text:
+        return ""
+    if text.lower() == "error":
+        return "error"
+
+    legacy = LEGACY_CONFIDENCE_MAP.get(text.lower())
+    if legacy is not None:
+        return f"{legacy:.2f}"
+
+    try:
+        return f"{max(0.0, min(1.0, float(text))):.2f}"
+    except ValueError:
+        return ""
 
 
 def is_no_endpoint_message(message: str) -> bool:
@@ -1146,7 +1170,7 @@ def call_native_provider_single(client, paper: dict, max_chars: int) -> dict:
         "filename": paper["filename"],
         "journal": paper["journal"],
         "llm_prereg": verdict.get("prereg"),
-        "llm_confidence": verdict.get("confidence", ""),
+        "llm_confidence": normalize_confidence_value(verdict.get("confidence", "")),
         "llm_evidence": verdict.get("evidence", ""),
         "llm_registry_url": verdict.get("registry_url") or "",
         "llm_reasoning": verdict.get("reasoning", ""),
@@ -1213,7 +1237,7 @@ def call_native_provider_batch(client, papers: list, max_chars: int) -> list:
                     "filename": paper["filename"],
                     "journal": paper["journal"],
                     "llm_prereg": v.get("prereg"),
-                    "llm_confidence": v.get("confidence", ""),
+                    "llm_confidence": normalize_confidence_value(v.get("confidence", "")),
                     "llm_evidence": v.get("evidence", ""),
                     "llm_registry_url": v.get("registry_url") or "",
                     "llm_reasoning": v.get("reasoning", ""),
@@ -1347,7 +1371,7 @@ def call_openrouter_batch_once(api_key: str, model: str, papers: list, max_chars
                     "filename": paper["filename"],
                     "journal": paper["journal"],
                     "llm_prereg": v.get("prereg"),
-                    "llm_confidence": v.get("confidence", ""),
+                    "llm_confidence": normalize_confidence_value(v.get("confidence", "")),
                     "llm_evidence": v.get("evidence", ""),
                     "llm_registry_url": v.get("registry_url") or "",
                     "llm_reasoning": v.get("reasoning", ""),
@@ -1414,7 +1438,7 @@ def call_openrouter_single_once(api_key: str, model: str, paper: dict, max_chars
                 "filename": paper["filename"],
                 "journal": paper["journal"],
                 "llm_prereg": verdict.get("prereg"),
-                "llm_confidence": verdict.get("confidence", ""),
+                "llm_confidence": normalize_confidence_value(verdict.get("confidence", "")),
                 "llm_evidence": verdict.get("evidence", ""),
                 "llm_registry_url": verdict.get("registry_url") or "",
                 "llm_reasoning": verdict.get("reasoning", ""),
@@ -1666,9 +1690,9 @@ def print_summary(results_csv: Path):
         print(f"    LLM says NOT pre-registered: {s['no']}")
         print(f"    Errors                   : {s['error']}")
         if gt and g == "A":
-            print(f"    → {s['yes']}/{gt} keyword-only hits confirmed ({s['yes']/gt:.1%})")
+            print(f"    -> {s['yes']}/{gt} text-only papers confirmed ({s['yes']/gt:.1%})")
         elif gt and g == "C":
-            print(f"    → {s['yes']}/{gt} link-backed candidates confirmed ({s['yes']/gt:.1%})")
+            print(f"    -> {s['yes']}/{gt} link-backed candidates confirmed ({s['yes']/gt:.1%})")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -1676,7 +1700,7 @@ def print_summary(results_csv: Path):
 def main():
     parser = argparse.ArgumentParser(description="Review pipeline preregistration candidates via LLM API")
     parser.add_argument("--group", action="append", default=[],
-                        help="Groups to process: A (keyword-only), C (link-backed), or all")
+                        help="Groups to process: A (text-only/no candidate link), C (link-backed), or all")
     parser.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS,
                         help="Max chars of PDF text to send (0 = full PDF, default 0)")
     parser.add_argument("--provider", choices=["gemini", "openrouter"], default=DEFAULT_PROVIDER,
