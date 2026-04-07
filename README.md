@@ -78,7 +78,7 @@ Useful options:
 - `output/results.xlsx`
 - `output/pipeline_run.log`
 
-## Remaining Scripts
+## Scripts
 
 - `scripts/run_pdf_pipeline.py`: one-command runner for the full workflow.
 - `scripts/scan_pdf_folder.py`: PDF scan and first-pass prereg detection.
