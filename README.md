@@ -149,9 +149,9 @@ Always respond with ONLY a JSON object (no markdown fences, no extra text):
 }
 ```
 
-### Group A Prompt Template
+### Prompt Template For Keyword-Only Hits
 
-Used for keyword-only hits with no trusted registry link yet.
+Used when the scanner found preregistration language but no trusted registry link yet.
 
 ```text
 Paper filename: {filename}
@@ -171,9 +171,9 @@ Determine whether THIS paper reports its OWN pre-registration.
 {text}
 ```
 
-### Group C Prompt Template
+### Prompt Template For Papers With Candidate Registry Links
 
-Used when the pipeline already found candidate registry links.
+Used when the pipeline already found one or more candidate preregistration links.
 
 ```text
 Paper filename: {filename}
