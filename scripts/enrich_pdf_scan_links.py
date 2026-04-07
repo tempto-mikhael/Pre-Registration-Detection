@@ -8,14 +8,14 @@ This script reuses source checks from find_prereg_links.py and adds PDF-based
 DOI/title extraction so it can run directly on local PDF scan outputs.
 
 Input:
-  output/pdf_scan_results_v2.csv  (default; override with --scan)
+  output/pdf_scan_results.csv  (default; override with --scan)
 
 Output:
   output/pdf_scan_prereg_links.csv  (resumable — already-done pdf_path rows skipped)
 
 Usage:
   python scripts/enrich_pdf_scan_links.py
-  python scripts/enrich_pdf_scan_links.py --scan output/pdf_scan_results_v2.csv
+  python scripts/enrich_pdf_scan_links.py --scan output/pdf_scan_results.csv
   python scripts/enrich_pdf_scan_links.py --delay 0.8
   python scripts/enrich_pdf_scan_links.py --sample 100
 """
@@ -51,8 +51,8 @@ from find_prereg_links import (
 )
 
 PROJECT_ROOT = Path(__file__).parent.parent
-DEFAULT_INPUT_CSV = PROJECT_ROOT / "output" / "pdf_scan_results_v2.csv"
-FALLBACK_INPUT_CSV = PROJECT_ROOT / "output" / "pdf_scan_results.csv"
+DEFAULT_INPUT_CSV = PROJECT_ROOT / "output" / "pdf_scan_results.csv"
+FALLBACK_INPUT_CSV = PROJECT_ROOT / "output" / "pdf_scan_results_v2.csv"
 DEFAULT_OUTPUT_CSV = PROJECT_ROOT / "output" / "pdf_scan_prereg_links.csv"
 
 DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Za-z0-9]+\b")

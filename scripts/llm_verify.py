@@ -6,20 +6,16 @@ Sends each ambiguous paper's text to an LLM provider (Gemini/OpenRouter)
 and asks whether the paper reports its OWN pre-registration.
 Resumable, rate-limited, outputs CSV.
 
-Three groups:
-  A – auto_prereg=1 but no link found (keyword-only hits)
-  B – xlsx prereg=1 but our scanner missed (auto_prereg=0)
-  C – disputed: we found link evidence but xlsx says prereg=0
+Two pipeline groups:
+  A – keyword-only hits (scanner found prereg wording but no registry link)
+  C – link-backed candidates (scanner or enrichment found a registry link)
 
 Usage:
     # Set your API key first:
     $env:GEMINI_API_KEY = "your-key-here"
 
-    # Run all groups:
+    # Run the pipeline review set:
     python llm_verify.py --group all
-
-    # Run just the 84 disputed papers as a test:
-    python llm_verify.py --group C
 
     # Custom settings:
     python llm_verify.py --group all --max-chars 15000 --tpm 250000 --model gemini-2.0-flash
@@ -32,12 +28,13 @@ import argparse
 import csv
 import json
 import os
+import re
 import sys
 import time
+from functools import lru_cache
 from pathlib import Path
 
 import fitz  # PyMuPDF
-import openpyxl
 import requests
 from path_utils import resolve_existing_path, resolve_output_path
 
@@ -56,10 +53,69 @@ DEFAULT_SCAN_CSV = OUTPUT_DIR / "pdf_scan_results.csv"
 FALLBACK_SCAN_CSV = OUTPUT_DIR / "pdf_scan_results_v2.csv"
 DEFAULT_ENRICHED_CSV = OUTPUT_DIR / "pdf_scan_prereg_links_dedup.csv"
 FALLBACK_ENRICHED_CSV = OUTPUT_DIR / "pdf_scan_prereg_links.csv"
-DEFAULT_XLSX_PATH = ROOT / "journal_articles_with_pap_2025-03-14.xlsx"
-DEFAULT_RESULTS_CSV = OUTPUT_DIR / "llm_gemini_verdicts.csv"
+DEFAULT_RESULTS_CSV = OUTPUT_DIR / "llm_verdicts.csv"
+
+PREREG_TERMS = (
+    "pre-registration",
+    "preregistration",
+    "pre-registered",
+    "preregistered",
+    "pre analysis plan",
+    "pre-analysis plan",
+    "analysis plan",
+    "registered report",
+)
+
+MATERIALS_TERMS = (
+    "replication material",
+    "replication materials",
+    "replication data",
+    "data and code",
+    "data and scripts",
+    "data and materials",
+    "data, code, and materials",
+    "data and code scripts",
+    "supplementary data",
+    "supplementary files",
+    "code scripts",
+    "reproduce analyses",
+    "reproduction code",
+)
 
 VERIFIED_QUALITIES = {"VERIFIED", "DOI_CONFIRMED", "AUTHOR_CONFIRMED"}
+
+FOCUSED_TEXT_PATTERNS = [
+    re.compile(r"pre-?registered", re.IGNORECASE),
+    re.compile(r"pre-?registration", re.IGNORECASE),
+    re.compile(r"preregistration", re.IGNORECASE),
+    re.compile(r"pre-?analysis plan", re.IGNORECASE),
+    re.compile(r"analysis plan", re.IGNORECASE),
+    re.compile(r"registered an analysis plan", re.IGNORECASE),
+    re.compile(r"registered report", re.IGNORECASE),
+    re.compile(r"aspredicted", re.IGNORECASE),
+    re.compile(r"osf\s*\.\s*io", re.IGNORECASE),
+    re.compile(r"open science framework", re.IGNORECASE),
+    re.compile(r"socialscienceregistry\s*\.\s*org", re.IGNORECASE),
+    re.compile(r"egap\s*\.\s*org", re.IGNORECASE),
+    re.compile(r"aearctr-\s*\d+", re.IGNORECASE),
+    re.compile(r"\b3ie\b", re.IGNORECASE),
+]
+
+DIRECT_PREREG_PATTERNS = [
+    re.compile(r"\b(?:we|our|this (?:paper|study|experiment)|the study|the paper)\b.{0,140}\bpre-?registered\b", re.IGNORECASE | re.DOTALL),
+    re.compile(r"\bpreregistered at\b.{0,160}\b(?:osf|open science framework|aspredicted|egap|socialscienceregistry|aearctr|3ie)\b", re.IGNORECASE | re.DOTALL),
+    re.compile(r"\bregistered an analysis plan\b.{0,160}\b(?:osf|open science framework|aspredicted|egap|socialscienceregistry|3ie)\b", re.IGNORECASE | re.DOTALL),
+    re.compile(r"\bpre-?analysis plan\b.{0,220}\b(?:before|prior to|a priori)\b.{0,180}\b(?:data|follow-up|impact analyses|analysis|completion)\b", re.IGNORECASE | re.DOTALL),
+    re.compile(r"\bas we preregistered\b", re.IGNORECASE),
+    re.compile(r"\bpreregistration\b.{0,220}\b(?:osf|open science framework|aspredicted|egap|socialscienceregistry|aearctr)\b", re.IGNORECASE | re.DOTALL),
+]
+
+REGISTRY_URL_PATTERNS = [
+    re.compile(r"https?://(?:www\.)?aspredicted\.org/blind(?:\.php)?\?x=[a-z0-9]+", re.IGNORECASE),
+    re.compile(r"https?://(?:www\.)?socialscienceregistry\.org/trials/\d+", re.IGNORECASE),
+    re.compile(r"https?://(?:www\.)?egap\.org/registration/\d+", re.IGNORECASE),
+    re.compile(r"https?://(?:www\.)?osf\.io/[a-z0-9]+(?:/[^\s)\]}]*)?", re.IGNORECASE),
+]
 
 DEFAULT_MAX_CHARS = 0  # 0 = no limit (full PDF text); set to e.g. 40_000 to cap
 DEFAULT_MODEL     = "gemini-3-flash-preview"
@@ -139,6 +195,12 @@ IMPORTANT DISTINCTIONS:
 - If a provided external link is a real registry page for the same paper and the
   registry title clearly matches the paper, that is positive evidence even when
   the PDF uses brief wording or does not repeat the exact URL in the body text.
+- If the registry evidence shows a different title, different authors, or weak
+  match quality, treat that as meaningful negative evidence that the link may
+  belong to another study.
+- SPECIAL RULE FOR BLIND ASPREDICTED LINKS: If the registry URL contains "aspredicted.org/blind.php?x=", 
+  treat this as definitive evidence of pre-registration REGARDLESS of author overlap or title match, 
+  since blind registrations are anonymous by design and zero author overlap is expected.
 - Look carefully in FOOTNOTES, DATA sections, APPENDICES, and ACKNOWLEDGEMENTS,
   not just the abstract — pre-registration disclosures are often in footnotes.
 - The paper text provided may be sampled from BOTH the beginning AND the end of the
@@ -170,42 +232,6 @@ Determine whether THIS paper reports its OWN pre-registration.
 --- PAPER TEXT (beginning + end sample) ---
 {text}"""
 
-PROMPT_B = """\
-Paper filename: {filename}
-Journal: {journal}
-
-Our automated keyword scanner did NOT flag this paper, but a human reviewer
-marked it as pre-registered. The text below is sampled from the BEGINNING and
-END of the paper. Please carefully read the text and determine whether this
-paper reports its own pre-registration. Look for unusual phrasings, footnotes,
-or appendix references that a keyword scan might miss. Pre-registration
-disclosures are often in footnotes on page 1 or in an appendix/data section.
-
---- PAPER TEXT (beginning + end sample) ---
-{text}"""
-
-PROMPT_D = """\
-Paper filename: {filename}
-Journal: {journal}
-
-This paper was flagged by our ORIGINAL keyword search tool as containing
-pre-registration-related keywords. However, our secondary pymupdf text
-extractor did NOT reproduce those keywords — this is likely a text-encoding
-or hyphenation difference between the two extraction tools.
-
-Please read the paper text carefully and determine whether this paper reports
-its OWN pre-registration. Pay special attention to:
-  - Footnotes on the first 1-2 pages
-  - The data/methods section
-  - Appendices and acknowledgements
-  - Any mention of a registry URL, trial number, or pre-analysis plan
-
-Do NOT mark as pre-registered simply because the paper cites or discusses
-pre-registration in general — it must be THIS paper's own registration.
-
---- PAPER TEXT (beginning + end sample) ---
-{text}"""
-
 PROMPT_C = """\
 Paper filename: {filename}
 Journal: {journal}
@@ -214,8 +240,10 @@ Our automated pipeline found these pre-registration links associated with
 this paper:
 {links_section}
 
-However, a human reviewer marked this paper as NOT pre-registered (prereg=0).
-The text below is sampled from the BEGINNING and END of the paper.
+Registry evidence gathered for the best candidate link:
+{registry_evidence}
+
+The text below is sampled from the paper with extra focus on preregistration-related passages.
 Please read the paper text and determine:
 1. Does this paper report its OWN pre-registration?
 2. Do the links above belong to THIS paper's pre-registration, or are they
@@ -224,9 +252,27 @@ Please read the paper text and determine:
 Important:
 - The links above were surfaced by our registry-search pipeline, so treat them
   as serious candidate matches rather than random URLs.
-- Do not dismiss a link only because the paper calls it "materials",
-  "supplementary", or "replication" if the linked registry record still appears
-  to be the paper's own pre-registration.
+- A verified paper-specific registry entry can count as preregistration evidence
+  even if the paper text itself does not explicitly mention preregistration.
+- Absence of an explicit preregistration statement in the paper text is only
+  weak negative evidence and should not override a strong direct registry match.
+ - If the paper itself explicitly says the study/experiment was pre-registered,
+   registered an analysis plan, or filed a pre-analysis plan before data collection,
+   count that as preregistration even if the registry metadata is incomplete.
+ - Do not count plain data/materials/replication/supplementary repositories as
+   preregistration unless the paper text or registry page explicitly indicates
+   preregistration, registration, or a pre-analysis plan.
+- If the evidence only shows replication materials, data, code, or
+  supplementary files, return prereg=false.
+- For OSF links, an OSF project/node page is not enough by itself. Treat OSF
+  nodes/projects as materials repositories unless the evidence explicitly shows
+  preregistration/registration terms.
+- SPECIAL RULE FOR BLIND ASPREDICTED LINKS: If any registry URL contains "aspredicted.org/blind.php?x=", 
+  treat this as definitive evidence of pre-registration REGARDLESS of author overlap, title match, or other quality metrics, 
+  since blind registrations are anonymous by design and zero author overlap is expected.
+- But if the registry evidence itself points to a different title, different
+  authors, or weak match quality, use that as evidence that the link may belong
+  to another study (except for blind AsPredicted links as noted above).
 
 --- PAPER TEXT (beginning + end sample) ---
 {text}"""
@@ -243,21 +289,15 @@ def build_paper_section(paper: dict, index: int, text: str) -> str:
     if paper["group"] == "A":
         section += f"Detection context: Keywords detected: {paper['keywords']}. "
         section += "No external registry links found.\n"
-    elif paper["group"] == "B":
-        section += ("Detection context: Our keyword scanner did NOT flag this, "
-                    "but a human reviewer marked it as pre-registered. "
-                    "Look carefully for unusual phrasings.\n")
     elif paper["group"] == "C":
         section += (f"Detection context: Our pipeline found these links:\n"
                     f"{paper.get('links_section', '')}")
-        section += ("However, a human reviewer marked this as NOT pre-registered. "
-                    "Determine if links belong to THIS paper. Treat the registry "
-                    "links as serious candidate matches and do not reject them "
-                    "solely because the PDF wording is brief.\n")
-    else:  # D
-        section += ("Detection context: Original keyword search flagged this paper, "
-                    "but pymupdf re-scan did not reproduce the keywords (encoding/hyphenation issue). "
-                    "Look carefully for pre-registration disclosures.\n")
+        section += (f"Registry evidence:\n"
+                    f"{paper.get('registry_evidence', '(none)')}\n")
+        section += ("Determine if links belong to THIS paper. Treat the registry "
+                    "links as serious candidate matches, but also use title/author "
+                    "mismatch evidence when the registry appears to belong to a "
+                    "different study.\n")
 
     section += f"--- PAPER TEXT ---\n{text}\n"
     return section
@@ -287,24 +327,6 @@ fences, no extra text). Each object must be in order matching the paper index:
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 
-def load_xlsx(xlsx_path: Path):
-    wb = openpyxl.load_workbook(str(xlsx_path), read_only=True, data_only=True)
-    ws = wb.active
-    headers = [c.value for c in list(ws.rows)[1]]
-    by_file = {}
-    for row in ws.iter_rows(min_row=3, values_only=True):
-        d = dict(zip(headers, row))
-        pdf = (d.get("pdf") or "").strip()
-        if pdf:
-            by_file[pdf] = {
-                "prereg": d.get("prereg"),
-                "link_prereg": d.get("link_prereg") or "",
-                "journal": d.get("journal") or "",
-            }
-    wb.close()
-    return by_file
-
-
 def load_scan(scan_csv: Path):
     result = {}
     with open(scan_csv, newline="", encoding="utf-8") as f:
@@ -323,6 +345,363 @@ def load_enriched(enriched_csv: Path):
             fname = Path(r["pdf_path"]).name
             result[fname] = r
     return result
+
+
+def split_links(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    out = []
+    seen = set()
+    for part in str(raw).split(";"):
+        text = part.strip().rstrip(".,;:")
+        if text and text not in seen:
+            seen.add(text)
+            out.append(text)
+    return out
+
+
+def unique_preserve(items: list[str]) -> list[str]:
+    seen = set()
+    out = []
+    for item in items:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def normalise_registry_text(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = text.replace("\u200b", "").replace("\u200c", "").replace("\u200d", "").replace("\ufeff", "")
+    replacements = [
+        (r"https?\s*:\s*/\s*/\s*", lambda m: "https://" if "https" in m.group(0).lower() else "http://"),
+        (r"aspredicted\s*\.\s*org", "aspredicted.org"),
+        (r"osf\s*\.\s*io", "osf.io"),
+        (r"egap\s*\.\s*org", "egap.org"),
+        (r"socialscienceregistry\s*\.\s*org", "socialscienceregistry.org"),
+        (r"blind\s*\.\s*php", "blind.php"),
+        (r"\?\s*x\s*=\s*", "?x="),
+        (r"/\s+", "/"),
+        (r"\s+/", "/"),
+    ]
+    for pattern, replacement in replacements:
+        cleaned = re.sub(pattern, replacement, cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"(?<=\d)\s+(?=\d)", "", cleaned)
+    return cleaned
+
+
+def extract_registry_urls_from_text(text: str) -> list[str]:
+    normalised = normalise_registry_text(text)
+    found = []
+    for pattern in REGISTRY_URL_PATTERNS:
+        for match in pattern.findall(normalised):
+            found.append(match.rstrip(".,;:)"))
+    return unique_preserve(found)
+
+
+def _snippet_around(text: str, start: int, end: int, radius: int = 180) -> str:
+    lo = max(0, start - radius)
+    hi = min(len(text), end + radius)
+    return " ".join(text[lo:hi].split())
+
+
+def detect_direct_prereg_signal(text: str, extra_links: list[str] | None = None) -> dict:
+    raw = text or ""
+    normalised = normalise_registry_text(raw)
+    links = unique_preserve(extract_registry_urls_from_text(normalised) + split_links("; ".join(extra_links or [])))
+
+    if not any(re.search(r"osf\.io/[a-z0-9]+", link, flags=re.IGNORECASE) for link in links):
+        name_match = re.search(r"\(\s*name\s*:\s*([^)]+?)\s*\)", normalised, flags=re.IGNORECASE)
+        if name_match and ("open science framework" in normalised.lower() or "osf.io/" in normalised.lower()):
+            resolved = search_osf_registration_by_title(name_match.group(1).strip())
+            if resolved:
+                links = unique_preserve([resolved] + links)
+
+    blind_links = [link for link in links if "aspredicted.org/blind.php?x=" in link.lower()]
+    if blind_links:
+        pattern = re.search(r"aspredicted\.org/blind(?:\.php)?\?x=[a-z0-9]+", normalised, flags=re.IGNORECASE)
+        snippet = _snippet_around(normalised, pattern.start(), pattern.end()) if pattern else "Blind AsPredicted preregistration link cited in paper text."
+        return {
+            "matched": True,
+            "rule": "blind_aspredicted_text_link",
+            "evidence": snippet[:220],
+            "registry_url": blind_links[0],
+        }
+
+    for pattern in DIRECT_PREREG_PATTERNS:
+        match = pattern.search(normalised)
+        if not match:
+            continue
+        return {
+            "matched": True,
+            "rule": "explicit_text_prereg_statement",
+            "evidence": _snippet_around(normalised, match.start(), match.end())[:220],
+            "registry_url": links[0] if links else "",
+        }
+
+    return {"matched": False, "rule": "", "evidence": "", "registry_url": links[0] if links else ""}
+
+
+@lru_cache(maxsize=2048)
+def _osf_api_record(url: str) -> dict:
+    m = re.search(r"osf\.io/(?:preprints/osf/)?([a-z0-9]+)", url, re.IGNORECASE)
+    if not m:
+        return {}
+    node_id = m.group(1).lower()
+    for endpoint in ("registrations", "nodes", "preprints"):
+        try:
+            r = requests.get(
+                f"https://api.osf.io/v2/{endpoint}/{node_id}/",
+                headers={"User-Agent": "ercautomation/1.0"},
+                timeout=15,
+            )
+            if r.status_code != 200:
+                continue
+            data = r.json().get("data", {})
+            attrs = data.get("attributes", {})
+            return {
+                "osf_endpoint": endpoint,
+                "osf_type": data.get("type", "") or "",
+                "osf_category": attrs.get("category", "") or "",
+                "osf_title": attrs.get("title", "") or "",
+                "osf_description": attrs.get("description", "") or "",
+            }
+        except Exception:
+            continue
+    return {}
+
+
+@lru_cache(maxsize=512)
+def search_osf_registration_by_title(title: str) -> str:
+    query = (title or "").strip()
+    if not query:
+        return ""
+    try:
+        r = requests.get(
+            "https://api.osf.io/v2/registrations/",
+            params={"filter[title]": query[:150], "page[size]": 5},
+            headers={"User-Agent": "ercautomation/1.0"},
+            timeout=20,
+        )
+        if r.status_code != 200:
+            return ""
+        items = r.json().get("data", []) or []
+        query_lower = query.lower()
+        for item in items:
+            attrs = item.get("attributes", {})
+            candidate = (attrs.get("title") or "").strip()
+            if candidate.lower() == query_lower and item.get("id"):
+                return f"https://osf.io/{item['id']}/"
+        for item in items:
+            attrs = item.get("attributes", {})
+            candidate = (attrs.get("title") or "").strip().lower()
+            if query_lower in candidate and item.get("id"):
+                return f"https://osf.io/{item['id']}/"
+    except Exception:
+        return ""
+    return ""
+
+
+def _contains_any(text: str, phrases: tuple[str, ...]) -> bool:
+    lower = (text or "").lower()
+    return any(p in lower for p in phrases)
+
+
+@lru_cache(maxsize=2048)
+def _fetch_registry_evidence(url: str, paper_title: str, paper_doi: str) -> dict:
+    try:
+        from find_prereg_links import (
+            author_overlap,
+            crossref_authors_by_doi,
+            crossref_authors_by_title,
+            validate_link_quality,
+        )
+    except Exception:
+        return {}
+
+    evidence = {}
+    lq = validate_link_quality(url, paper_title or "", paper_doi or "")
+    if lq.get("quality"):
+        evidence["best_link_quality"] = lq.get("quality")
+    if lq.get("registry_page_title"):
+        evidence["best_link_title"] = lq.get("registry_page_title")
+    if lq.get("sim") not in (None, "", "N/A"):
+        evidence["best_link_sim"] = lq.get("sim")
+
+    page_text = lq.get("page_text") or ""
+    evidence["page_has_prereg_terms"] = "1" if _contains_any(page_text, PREREG_TERMS) else "0"
+    evidence["page_has_materials_terms"] = "1" if _contains_any(page_text, MATERIALS_TERMS) else "0"
+    if "osf.io" in (url or "").lower():
+        osf = _osf_api_record(url)
+        endpoint = osf.get("osf_endpoint", "")
+        category = osf.get("osf_category", "")
+        if endpoint or category:
+            evidence["osf_object_type"] = f"{endpoint}:{category}".strip(":")
+        desc = osf.get("osf_description", "") or ""
+        if desc:
+            if _contains_any(desc, PREREG_TERMS):
+                evidence["page_has_prereg_terms"] = "1"
+            if _contains_any(desc, MATERIALS_TERMS):
+                evidence["page_has_materials_terms"] = "1"
+    if page_text and (paper_title or paper_doi):
+        paper_authors = crossref_authors_by_doi(paper_doi) if paper_doi else []
+        if not paper_authors and paper_title:
+            paper_authors, _ = crossref_authors_by_title(paper_title)
+        if paper_authors:
+            _, detail = author_overlap(paper_authors, page_text, url)
+            if detail:
+                evidence["author_match"] = detail
+    return evidence
+
+
+def _author_match_ratio(detail: str) -> float:
+    text = (detail or "").strip()
+    m = re.match(r"(\d+)\s*/\s*(\d+)", text)
+    if not m:
+        return -1.0
+    denom = int(m.group(2))
+    if denom == 0:
+        return -1.0
+    return int(m.group(1)) / denom
+
+
+def _link_quality_score(quality: str) -> int:
+    scores = {
+        "DOI_CONFIRMED": 6,
+        "VERIFIED": 5,
+        "AUTHOR_CONFIRMED": 4,
+        "UNCERTAIN": 3,
+        "NO_TITLE": 2,
+        "TITLE_MISMATCH": 1,
+        "UNREACHABLE": 0,
+    }
+    quality = (quality or "").strip()
+    if quality.startswith("AI_LINK_"):
+        return -1
+    return scores.get(quality, -1)
+
+
+def _merge_link_evidence(link: str, title_guess: str, doi_guess: str, enriched_row: dict, include_stale: bool) -> dict:
+    evidence = {
+        "best_link_quality": "",
+        "best_link_title": "",
+        "best_link_sim": "",
+        "author_match": "",
+        "ai_link_check": "",
+        "ai_link_reasoning": "",
+        "osf_object_type": "",
+        "page_has_prereg_terms": "",
+        "page_has_materials_terms": "",
+    }
+    if include_stale:
+        evidence.update({
+            "best_link_quality": (enriched_row.get("best_link_quality") or "").strip(),
+            "best_link_title": (enriched_row.get("best_link_title") or "").strip(),
+            "best_link_sim": (enriched_row.get("best_link_sim") or "").strip(),
+            "author_match": (enriched_row.get("author_match") or "").strip(),
+            "ai_link_check": (enriched_row.get("ai_link_check") or "").strip(),
+            "ai_link_reasoning": (enriched_row.get("ai_link_reasoning") or "").strip(),
+            "osf_object_type": (enriched_row.get("osf_object_type") or "").strip(),
+            "page_has_prereg_terms": (enriched_row.get("page_has_prereg_terms") or "").strip(),
+            "page_has_materials_terms": (enriched_row.get("page_has_materials_terms") or "").strip(),
+        })
+
+    fresh = _fetch_registry_evidence(link, title_guess, doi_guess)
+    for key, value in fresh.items():
+        if value not in (None, ""):
+            evidence[key] = str(value).strip()
+
+    author_ratio = _author_match_ratio(evidence.get("author_match", ""))
+    if (
+        author_ratio >= 0.5
+        and evidence.get("best_link_quality") in {"UNCERTAIN", "TITLE_MISMATCH", "NO_TITLE", ""}
+    ):
+        evidence["best_link_quality"] = "AUTHOR_CONFIRMED"
+    return evidence
+
+
+def best_registry_evidence(scan_row: dict, enriched_row: dict) -> tuple[str, dict]:
+    links = split_links(scan_row.get("auto_link_prereg")) + split_links(enriched_row.get("all_found_links"))
+    links = unique_preserve(links)
+    if not links:
+        return "", {}
+
+    title_guess = (enriched_row.get("title_guess") or "").strip()
+    doi_guess = (enriched_row.get("doi_from_pdf") or "").strip()
+
+    best_link = ""
+    best_evidence = {}
+    best_score = None
+    for idx, link in enumerate(links):
+        evidence = _merge_link_evidence(
+            link=link,
+            title_guess=title_guess,
+            doi_guess=doi_guess,
+            enriched_row=enriched_row,
+            include_stale=(idx == 0),
+        )
+        score = (
+            1 if "aspredicted.org/blind.php?x=" in link.lower() else 0,
+            _link_quality_score(evidence.get("best_link_quality", "")),
+            _author_match_ratio(evidence.get("author_match", "")),
+            1 if evidence.get("page_has_prereg_terms") == "1" else 0,
+            1 if evidence.get("osf_object_type", "").startswith("registrations") else 0,
+            len(link),
+            -idx,
+        )
+        if best_score is None or score > best_score:
+            best_link = link
+            best_evidence = evidence
+            best_score = score
+    return best_link, best_evidence
+
+
+def build_registry_evidence_section(scan_row: dict, enriched_row: dict) -> str:
+    links = unique_preserve(split_links(scan_row.get("auto_link_prereg")) + split_links(enriched_row.get("all_found_links")))
+    if not links:
+        return "(none)"
+
+    title_guess = (enriched_row.get("title_guess") or "").strip()
+    doi_guess = (enriched_row.get("doi_from_pdf") or "").strip()
+    best_link, evidence = best_registry_evidence(scan_row, enriched_row)
+    if not best_link:
+        return "(none)"
+
+    if evidence.get("best_link_quality") and not evidence["best_link_quality"].startswith("AI_LINK_"):
+        if evidence.get("ai_link_check", "").startswith("rejected"):
+            evidence["ai_link_check"] = ""
+            evidence["ai_link_reasoning"] = ""
+    if _author_match_ratio(evidence.get("author_match", "")) > 0:
+        if evidence.get("ai_link_check", "").startswith("rejected"):
+            evidence["ai_link_check"] = ""
+            evidence["ai_link_reasoning"] = ""
+
+    lines = [f"  Best candidate link: {best_link}"]
+    if evidence["best_link_quality"]:
+        lines.append(f"  Link quality: {evidence['best_link_quality']}")
+    if evidence["best_link_title"]:
+        lines.append(f"  Registry page title: {evidence['best_link_title']}")
+    if evidence["best_link_sim"]:
+        lines.append(f"  Title similarity: {evidence['best_link_sim']}")
+    if evidence["author_match"]:
+        lines.append(f"  Author overlap: {evidence['author_match']}")
+    if evidence["osf_object_type"]:
+        lines.append(f"  OSF object type: {evidence['osf_object_type']}")
+    if evidence["page_has_prereg_terms"]:
+        lines.append(f"  Page has prereg terms: {evidence['page_has_prereg_terms']}")
+    if evidence["page_has_materials_terms"]:
+        lines.append(f"  Page has materials terms: {evidence['page_has_materials_terms']}")
+    if evidence["ai_link_check"]:
+        lines.append(f"  Link-specific AI check: {evidence['ai_link_check']}")
+    if evidence["ai_link_reasoning"]:
+        lines.append(f"  Link-specific AI reasoning: {evidence['ai_link_reasoning']}")
+    if title_guess:
+        lines.append(f"  Paper title used for comparison: {title_guess}")
+    if doi_guess:
+        lines.append(f"  Paper DOI used for comparison: {doi_guess}")
+    return "\n".join(lines)
 
 
 def load_done(results_csv: Path) -> set:
@@ -369,14 +748,61 @@ def extract_text(pdf_path: str, max_chars: int) -> str:
         return f"[ERROR extracting text: {e}]"
 
 
-# ── Group assembly ────────────────────────────────────────────────────────────
+def extract_text_for_prereg_review(pdf_path: str, max_chars: int) -> str:
+    full_text = extract_text(pdf_path, 0)
+    if full_text.startswith("[ERROR"):
+        return full_text
+    if max_chars == 0 or len(full_text) <= max_chars:
+        return full_text
 
-def build_groups(scan, enriched, xlsx, requested_groups, done_filenames=None):
+    head_budget = int(max_chars * 0.30)
+    tail_budget = int(max_chars * 0.20)
+    focus_budget = max_chars - head_budget - tail_budget
+
+    head = full_text[:head_budget]
+    tail = full_text[-tail_budget:] if tail_budget > 0 else ""
+
+    snippets = []
+    seen_spans = []
+    for pattern in FOCUSED_TEXT_PATTERNS:
+        for match in pattern.finditer(full_text):
+            start = max(0, match.start() - 220)
+            end = min(len(full_text), match.end() + 420)
+            if any(not (end < s or start > e) for s, e in seen_spans):
+                continue
+            seen_spans.append((start, end))
+            snippets.append(" ".join(full_text[start:end].split()))
+            if len(snippets) >= 8:
+                break
+        if len(snippets) >= 8:
+            break
+
+    focus_text = "\n\n".join(snippets)
+    if len(focus_text) > focus_budget:
+        focus_text = focus_text[:focus_budget]
+
+    parts = [head]
+    if focus_text:
+        parts.append("[... preregistration-focused excerpts from the full PDF ...]\n" + focus_text)
+    if tail:
+        parts.append("[... ending excerpt ...]\n" + tail)
+    return "\n\n".join(part for part in parts if part)
+
+
+# ── Pipeline candidate assembly ───────────────────────────────────────────────
+
+def build_groups(scan, enriched, requested_groups, done_filenames=None):
     papers = []
+    already_in = set()
+    done_already = done_filenames or set()
 
     if "A" in requested_groups:
         for fname, s in scan.items():
+            if fname in done_already:
+                continue
             if str(s.get("auto_prereg", "")).strip() != "1":
+                continue
+            if not s.get("pdf_path"):
                 continue
             if (s.get("auto_link_prereg") or "").strip():
                 continue
@@ -389,32 +815,20 @@ def build_groups(scan, enriched, xlsx, requested_groups, done_filenames=None):
                 "journal": s.get("journal", ""),
                 "keywords": s.get("triggered_keywords", ""),
                 "group": "A",
+                "scan_row": s,
+                "enriched_row": e,
             })
-
-    if "B" in requested_groups:
-        for fname, x in xlsx.items():
-            if x["prereg"] != 1:
-                continue
-            s = scan.get(fname, {})
-            if str(s.get("auto_prereg", "")).strip() == "1":
-                continue
-            if not s.get("pdf_path"):
-                continue
-            papers.append({
-                "filename": fname,
-                "pdf_path": s["pdf_path"],
-                "journal": x.get("journal") or s.get("journal", ""),
-                "keywords": "",
-                "group": "B",
-            })
+            already_in.add(fname)
 
     if "C" in requested_groups:
-        for fname in set(list(scan.keys()) + list(enriched.keys())):
-            x = xlsx.get(fname, {})
-            if x.get("prereg") != 0:
+        for fname in sorted(set(list(scan.keys()) + list(enriched.keys()))):
+            if fname in done_already or fname in already_in:
                 continue
             s = scan.get(fname, {})
             e = enriched.get(fname, {})
+            pdf_path = s.get("pdf_path") or e.get("pdf_path", "")
+            if not pdf_path:
+                continue
             pdf_link = (s.get("auto_link_prereg") or "").strip()
             enrich_links = (e.get("all_found_links") or "").strip()
             if not pdf_link and not enrich_links:
@@ -424,47 +838,98 @@ def build_groups(scan, enriched, xlsx, requested_groups, done_filenames=None):
             if pdf_link:
                 links_section += f"  From PDF text: {pdf_link}\n"
             if enrich_links:
-                links_section += f"  From API enrichment ({quality}): {enrich_links}\n"
+                links_section += f"  From enrichment ({quality}): {enrich_links}\n"
             papers.append({
                 "filename": fname,
-                "pdf_path": s.get("pdf_path") or e.get("pdf_path", ""),
-                "journal": x.get("journal") or s.get("journal", ""),
+                "pdf_path": pdf_path,
+                "journal": s.get("journal", ""),
                 "keywords": s.get("triggered_keywords", ""),
                 "links_section": links_section,
+                "registry_evidence": build_registry_evidence_section(s, e),
                 "group": "C",
-            })
-
-    if "D" in requested_groups:
-        # Papers where pymupdf auto_prereg=0 but the original keyword search
-        # did flag them (they exist in the scan CSV, just no keyword hit on re-scan).
-        # Exclude any already confirmed via link or already processed by A/B/C.
-        already_in = {p["filename"] for p in papers}
-        done_already = done_filenames or set()
-        for fname, s in scan.items():
-            if str(s.get("auto_prereg", "")).strip() != "0":
-                continue
-            if not s.get("pdf_path"):
-                continue
-            # skip if already covered by another group
-            if fname in already_in:
-                continue
-            # skip if already in results CSV
-            if fname in done_already:
-                continue
-            # skip if a link was found despite auto_prereg=0
-            e = enriched.get(fname, {})
-            if (e.get("all_found_links") or "").strip():
-                continue
-            papers.append({
-                "filename": fname,
-                "pdf_path": s["pdf_path"],
-                "journal": s.get("journal", ""),
-                "keywords": "(original search flagged; pymupdf re-scan missed)",
-                "group": "D",
+                "scan_row": s,
+                "enriched_row": e,
             })
 
     papers.sort(key=lambda p: (p["group"], p["filename"]))
     return papers
+
+
+def deterministic_pipeline_verdict(paper: dict, max_chars: int) -> dict | None:
+    scan_row = paper.get("scan_row", {})
+    enriched_row = paper.get("enriched_row", {})
+    text = extract_text_for_prereg_review(paper["pdf_path"], max_chars)
+    if text.startswith("[ERROR"):
+        return {
+            "group": paper["group"],
+            "filename": paper["filename"],
+            "journal": paper["journal"],
+            "llm_prereg": None,
+            "llm_confidence": "error",
+            "llm_evidence": "",
+            "llm_registry_url": "",
+            "llm_reasoning": text[:200],
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "llm_model": "deterministic_rule",
+        }
+
+    links = split_links(scan_row.get("auto_link_prereg")) + split_links(enriched_row.get("all_found_links"))
+    links = unique_preserve(links)
+    direct = detect_direct_prereg_signal(text, links)
+    best_link, evidence = best_registry_evidence(scan_row, enriched_row)
+
+    if direct.get("matched"):
+        return {
+            "group": paper["group"],
+            "filename": paper["filename"],
+            "journal": paper["journal"],
+            "llm_prereg": True,
+            "llm_confidence": "high",
+            "llm_evidence": (direct.get("evidence") or "Paper text explicitly reports preregistration.")[:150],
+            "llm_registry_url": best_link or direct.get("registry_url") or "",
+            "llm_reasoning": (
+                "The paper text contains a direct own-study preregistration disclosure, so this "
+                "counts as preregistered even if registry metadata is incomplete or anonymous."
+            ),
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "llm_model": "deterministic_rule",
+        }
+
+    quality = (evidence.get("best_link_quality") or "").strip()
+    strong_registry = quality in {"VERIFIED", "DOI_CONFIRMED"} or (
+        quality == "AUTHOR_CONFIRMED"
+        and (
+            evidence.get("page_has_prereg_terms") == "1"
+            or (evidence.get("osf_object_type") or "").startswith("registrations")
+        )
+    )
+    if strong_registry and best_link:
+        return {
+            "group": paper["group"],
+            "filename": paper["filename"],
+            "journal": paper["journal"],
+            "llm_prereg": True,
+            "llm_confidence": "high" if quality in {"VERIFIED", "DOI_CONFIRMED"} else "medium",
+            "llm_evidence": (
+                f"Registry evidence is {quality}"
+                + (
+                    f" with author overlap {evidence.get('author_match')}"
+                    if evidence.get("author_match") else ""
+                )
+            )[:150],
+            "llm_registry_url": best_link,
+            "llm_reasoning": (
+                "The strongest available registry record matches this paper closely enough to count "
+                "as preregistration evidence, and weak text absence should not override it."
+            ),
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "llm_model": "deterministic_rule",
+        }
+
+    return None
 
 
 # ── Direct provider call helpers ─────────────────────────────────────────────
@@ -493,21 +958,16 @@ def is_no_endpoint_message(message: str) -> bool:
 
 
 def build_single_prompt(paper: dict, max_chars: int, _preextracted: str = None) -> str:
-    text = _preextracted if _preextracted is not None else extract_text(paper["pdf_path"], max_chars)
+    text = _preextracted if _preextracted is not None else extract_text_for_prereg_review(paper["pdf_path"], max_chars)
     if paper["group"] == "A":
         return PROMPT_A.format(
             filename=paper["filename"], journal=paper["journal"],
             keywords=paper["keywords"], text=text)
-    if paper["group"] == "B":
-        return PROMPT_B.format(
-            filename=paper["filename"], journal=paper["journal"], text=text)
-    if paper["group"] == "C":
-        return PROMPT_C.format(
-            filename=paper["filename"], journal=paper["journal"],
-            links_section=paper.get("links_section", ""), text=text)
-    # Group D
-    return PROMPT_D.format(
-        filename=paper["filename"], journal=paper["journal"], text=text)
+    return PROMPT_C.format(
+        filename=paper["filename"], journal=paper["journal"],
+        links_section=paper.get("links_section", ""),
+        registry_evidence=paper.get("registry_evidence", "(none)"),
+        text=text)
 
 
 def discover_openrouter_free_models(api_key: str, limit: int = 16) -> list[str]:
@@ -701,7 +1161,7 @@ def call_native_provider_batch(client, papers: list, max_chars: int) -> list:
     # Build combined prompt
     paper_sections = []
     for i, paper in enumerate(papers, 1):
-        text = extract_text(paper["pdf_path"], max_chars)
+        text = extract_text_for_prereg_review(paper["pdf_path"], max_chars)
         section = build_paper_section(paper, i, text)
         paper_sections.append(section)
 
@@ -828,7 +1288,7 @@ def _make_error_result(paper: dict, reason: str) -> dict:
 def call_openrouter_batch_once(api_key: str, model: str, papers: list, max_chars: int) -> list:
     # Pre-screen: extract text for every paper and flag extraction failures upfront
     # so they never reach the LLM and cannot produce a spurious False verdict.
-    texts = [extract_text(p["pdf_path"], max_chars) for p in papers]
+    texts = [extract_text_for_prereg_review(p["pdf_path"], max_chars) for p in papers]
     bad_idx = {i for i, t in enumerate(texts) if t.startswith("[ERROR")}
     good_indices = [i for i in range(len(papers)) if i not in bad_idx]
 
@@ -931,7 +1391,7 @@ def call_openrouter_batch_once(api_key: str, model: str, papers: list, max_chars
 def call_openrouter_single_once(api_key: str, model: str, paper: dict, max_chars: int) -> dict:
     # Guard: pre-extract text so a PDF failure cannot reach the LLM and produce a
     # spurious False verdict (LLM would see an error string and find no evidence).
-    _text = extract_text(paper["pdf_path"], max_chars)
+    _text = extract_text_for_prereg_review(paper["pdf_path"], max_chars)
     if _text.startswith("[ERROR"):
         return _make_error_result(paper, _text[:200])
     prompt = build_single_prompt(paper, max_chars, _preextracted=_text)
@@ -1208,15 +1668,15 @@ def print_summary(results_csv: Path):
         if gt and g == "A":
             print(f"    → {s['yes']}/{gt} keyword-only hits confirmed ({s['yes']/gt:.1%})")
         elif gt and g == "C":
-            print(f"    → {s['yes']}/{gt} disputed papers — LLM sides with our links ({s['yes']/gt:.1%})")
+            print(f"    → {s['yes']}/{gt} link-backed candidates confirmed ({s['yes']/gt:.1%})")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Verify pre-registration via LLM API")
+    parser = argparse.ArgumentParser(description="Review pipeline preregistration candidates via LLM API")
     parser.add_argument("--group", action="append", default=[],
-                        help="Groups to process: A, B, C, D, or all")
+                        help="Groups to process: A (keyword-only), C (link-backed), or all")
     parser.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS,
                         help="Max chars of PDF text to send (0 = full PDF, default 0)")
     parser.add_argument("--provider", choices=["gemini", "openrouter"], default=DEFAULT_PROVIDER,
@@ -1237,8 +1697,6 @@ def main():
                         help=f"Path to scan CSV (default: {DEFAULT_SCAN_CSV})")
     parser.add_argument("--enriched", type=str, default=None,
                         help=f"Path to enriched CSV (default: {DEFAULT_ENRICHED_CSV})")
-    parser.add_argument("--xlsx", type=str, default=None,
-                        help=f"Path to reference spreadsheet (default: {DEFAULT_XLSX_PATH})")
     parser.add_argument("--results-csv", type=str, default=None,
                         help=f"Path to verdict output CSV (default: {DEFAULT_RESULTS_CSV})")
     args = parser.parse_args()
@@ -1253,7 +1711,6 @@ def main():
         fallbacks=[FALLBACK_ENRICHED_CSV],
         required=False,
     )
-    xlsx_path = resolve_existing_path(args.xlsx, DEFAULT_XLSX_PATH, "reference spreadsheet")
     results_csv = resolve_output_path(args.results_csv, DEFAULT_RESULTS_CSV)
 
     provider = args.provider.lower()
@@ -1295,7 +1752,7 @@ def main():
 
     groups = [g.upper() for g in args.group] if args.group else ["ALL"]
     if "ALL" in groups:
-        groups = ["A", "B", "C", "D"]
+        groups = ["A", "C"]
 
     if args.reset and results_csv.exists():
         results_csv.unlink()
@@ -1304,9 +1761,8 @@ def main():
     print("Loading data...")
     scan = load_scan(scan_csv)
     enriched = load_enriched(enriched_csv)
-    xlsx = load_xlsx(xlsx_path)
     done = load_done(results_csv)
-    papers = build_groups(scan, enriched, xlsx, groups, done_filenames=done)
+    papers = build_groups(scan, enriched, groups, done_filenames=done)
 
     remaining = [p for p in papers if p["filename"] not in done]
     print(f"  Total in selected groups: {len(papers)}")
@@ -1315,6 +1771,27 @@ def main():
 
     if not remaining:
         print("\nAll papers already processed!")
+        print_summary(results_csv)
+        return
+
+    deterministic_results = []
+    llm_remaining = []
+    for paper in remaining:
+        deterministic = deterministic_pipeline_verdict(paper, args.max_chars)
+        if deterministic is None:
+            llm_remaining.append(paper)
+        else:
+            deterministic_results.append(deterministic)
+
+    for result in deterministic_results:
+        append_result(result, results_csv)
+
+    if deterministic_results:
+        print(f"  Deterministic decisions written: {len(deterministic_results)}")
+
+    remaining = llm_remaining
+    if not remaining:
+        print("\nAll remaining papers were resolved deterministically.")
         print_summary(results_csv)
         return
 
@@ -1342,7 +1819,7 @@ def main():
     est_tokens_per_batch = (args.max_chars // 4 + 200) * batch_size
 
     start_time = time.time()
-    papers_done = 0
+    papers_done = len(deterministic_results)
     api_calls = 0
 
     for batch_idx in range(batches_this_run):

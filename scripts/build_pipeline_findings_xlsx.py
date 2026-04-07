@@ -1,30 +1,26 @@
 #!/usr/bin/env python3
 """
-Build a pipeline-centered findings workbook with explicit final decisions.
+Build clean pipeline results from PDF-first preregistration detection outputs.
 
-This version keeps the raw pipeline signals for transparency, but also writes
-clear final columns so review is easier:
+Inputs:
+  - scan CSV
+  - enriched links CSV
+  - LLM verdict CSV
 
-- `final_link_url`
-- `final_link_decision`
-- `final_prereg_decision`
-- `prereg_inconsistent`
-- `link_inconsistent`
-- `experiment`
-
-It also brings selected reference columns from the original XLSX into the same
-sheet so you can filter directly on disagreements instead of checking papers
-one by one.
+Outputs:
+  - output/results.csv
+  - output/results.xlsx
 """
 
 import argparse
 import csv
-from difflib import SequenceMatcher
 import re
 import sys
 from collections import defaultdict
 from datetime import date
 from pathlib import Path
+from urllib.parse import urlparse
+
 from path_utils import resolve_existing_path, resolve_output_path
 
 try:
@@ -37,61 +33,52 @@ except ImportError:
 
 ROOT = Path(__file__).parent.parent
 OUTPUT_DIR = ROOT / "output"
-DEFAULT_SCAN = OUTPUT_DIR / "pdf_scan_results_v2.csv"
-FALLBACK_SCAN = OUTPUT_DIR / "pdf_scan_results.csv"
+DEFAULT_SCAN = OUTPUT_DIR / "pdf_scan_results.csv"
+FALLBACK_SCAN = OUTPUT_DIR / "pdf_scan_results_v2.csv"
 DEFAULT_LINKS_CSV = OUTPUT_DIR / "pdf_scan_prereg_links_dedup.csv"
 FALLBACK_LINKS_CSV = OUTPUT_DIR / "pdf_scan_prereg_links.csv"
-DEFAULT_VERDICTS_CSV = OUTPUT_DIR / "llm_gemini_verdicts.csv"
-DEFAULT_SOURCE_XLSX = ROOT / "journal_articles_with_pap_2025-03-14.xlsx"
-DEFAULT_OUT_XLSX = OUTPUT_DIR / f"pipeline_findings_{date.today()}.xlsx"
+DEFAULT_VERDICTS_CSV = OUTPUT_DIR / "llm_verdicts.csv"
+FALLBACK_VERDICTS_CSV = OUTPUT_DIR / "llm_gemini_verdicts.csv"
+DEFAULT_OUT_XLSX = OUTPUT_DIR / "results.xlsx"
+DEFAULT_OUT_CSV = OUTPUT_DIR / "results.csv"
 
 CONFIDENCE_MAP = {"high": 0.9, "medium": 0.6, "low": 0.25}
-FINAL_ACCEPTED_LINK_QUALITIES = {
-    "VERIFIED",
-    "DOI_CONFIRMED",
-    "AUTHOR_CONFIRMED",
-    "AI_LINK_CONFIRMED",
-}
+FINAL_ACCEPTED_LINK_QUALITIES = {"VERIFIED", "DOI_CONFIRMED", "AUTHOR_CONFIRMED", "AI_LINK_CONFIRMED"}
+CAUTIOUS_LINK_DOMAINS = {"osf.io", "clinicaltrials.gov"}
+TRUST_DIRECT_PDF_LINK_DOMAINS = {"aspredicted.org"}
+GENERIC_LINK_PATTERNS = [
+    re.compile(r"^https?://(?:www\.)?aspredicted\.org/?$", re.I),
+    re.compile(r"^https?://(?:www\.)?aspredicted\.org/blind/?$", re.I),
+    re.compile(r"^https?://(?:www\.)?egap\.org/?$", re.I),
+    re.compile(r"^https?://(?:www\.)?egap\.org/registration/?$", re.I),
+    re.compile(r"^https?://(?:www\.)?osf\.io/?$", re.I),
+    re.compile(r"^https?://(?:www\.)?osf\.io/(download|preprints|registries|search|meetings|institutions)/?$", re.I),
+    re.compile(r"^https?://(?:www\.)?socialscienceregistry\.org/?$", re.I),
+    re.compile(r"^https?://(?:www\.)?socialscienceregistry\.org/trials/?$", re.I),
+    re.compile(r"^https?://(?:www\.)?socialscienceregistry\.org/trials/0/?$", re.I),
+]
 
-
-# Styles
 META_FILL = PatternFill("solid", fgColor="E8E8E8")
-XLSX_FILL = PatternFill("solid", fgColor="E1F0FF")
 SCAN_FILL = PatternFill("solid", fgColor="FFF2CC")
 LINK_FILL = PatternFill("solid", fgColor="FCE5CD")
 AI_FILL = PatternFill("solid", fgColor="DDEEFF")
 FINAL_FILL = PatternFill("solid", fgColor="D9EAD3")
-COMPARE_FILL = PatternFill("solid", fgColor="F4CCCC")
 BOLD = Font(bold=True)
 
-
-# Column definitions: (name, fill, width)
 COLUMNS = [
-    ("id", META_FILL, 7),
-    ("filename", META_FILL, 24),
-    ("file_name", META_FILL, 48),
-    ("journal", META_FILL, 35),
+    ("filename", META_FILL, 28),
+    ("pdf_path", META_FILL, 54),
+    ("journal", META_FILL, 30),
     ("title", META_FILL, 60),
-    ("doi", META_FILL, 35),
-    ("xlsx_prereg", XLSX_FILL, 11),
-    ("xlsx_link_prereg", XLSX_FILL, 42),
-    ("xlsx_use_aearct", XLSX_FILL, 14),
-    ("xlsx_use_osf", XLSX_FILL, 12),
-    ("xlsx_use_aspredicted", XLSX_FILL, 16),
-    ("xlsx_use_other", XLSX_FILL, 13),
-    ("xlsx_type_lab", XLSX_FILL, 11),
-    ("xlsx_type_field", XLSX_FILL, 12),
-    ("xlsx_type_online", XLSX_FILL, 13),
-    ("xlsx_type_survey", XLSX_FILL, 13),
-    ("xlsx_type_obs", XLSX_FILL, 11),
-    ("text_source", META_FILL, 20),
+    ("doi", META_FILL, 34),
+    ("text_source", META_FILL, 18),
     ("no_data", SCAN_FILL, 9),
     ("auto_prereg", SCAN_FILL, 12),
     ("auto_use_aearct", SCAN_FILL, 14),
     ("auto_use_osf", SCAN_FILL, 12),
     ("auto_use_aspredicted", SCAN_FILL, 16),
     ("auto_use_other", SCAN_FILL, 13),
-    ("auto_link_prereg", SCAN_FILL, 42),
+    ("auto_link_prereg", SCAN_FILL, 44),
     ("auto_type_lab", SCAN_FILL, 11),
     ("auto_type_field", SCAN_FILL, 12),
     ("auto_type_online", SCAN_FILL, 13),
@@ -117,13 +104,7 @@ COLUMNS = [
     ("experiment", FINAL_FILL, 11),
     ("final_prereg_decision", FINAL_FILL, 18),
     ("final_prereg_source", FINAL_FILL, 18),
-    ("pipeline_prereg", FINAL_FILL, 16),
-    ("prereg_inconsistent", COMPARE_FILL, 18),
-    ("prereg_match_status", COMPARE_FILL, 20),
-    ("link_inconsistent", COMPARE_FILL, 16),
-    ("link_match_status", COMPARE_FILL, 24),
 ]
-
 
 _LOCATION_PATTERNS = [
     ("footnote", re.compile(r"\bfootnote", re.I)),
@@ -132,90 +113,28 @@ _LOCATION_PATTERNS = [
     ("introduction", re.compile(r"\bintroduction\b", re.I)),
     ("data section", re.compile(r"\bdata\s+(?:section|appendix|subsection)\b", re.I)),
     ("methods section", re.compile(r"\bmethods?\s*(?:section|subsection)?\b|methodology\b", re.I)),
-    ("empirical strategy", re.compile(r"\bempirical\s+strategy\b", re.I)),
     ("appendix", re.compile(r"\bappendix\b", re.I)),
-    ("main text", re.compile(r"\bmain\s+text\b", re.I)),
-    ("conclusion", re.compile(r"\bconclusion\b", re.I)),
-    ("results", re.compile(r"\bresults?\s+section\b", re.I)),
-    ("body", re.compile(r"\bpaper\s+body\b|\bbody\s+of\s+the\s+paper\b", re.I)),
     ("contract/PAP", re.compile(r"\bcontract\b|\bpre.?analysis\s+plan\b", re.I)),
-    ("ethics certificate", re.compile(r"\bethics\s+certif", re.I)),
 ]
 
 
 def load_csv(path: Path, key_col: str = "filename") -> dict:
     if not path.exists():
-        print(f"WARNING: not found - {path}")
         return {}
     out = {}
-    with open(path, encoding="utf-8", errors="ignore") as f:
+    with open(path, encoding="utf-8", errors="ignore", newline="") as f:
         for row in csv.DictReader(f):
             key = (row.get(key_col) or "").strip()
-            if key and key not in out:
+            if key:
                 out[key] = row
-    return out
-
-
-def load_reference_rows(xlsx_path: Path) -> dict:
-    """Return original XLSX fields keyed by bare pdf filename."""
-    if not xlsx_path.exists():
-        print(f"WARNING: source XLSX not found - {xlsx_path}")
-        return {}
-
-    wb = openpyxl.load_workbook(str(xlsx_path), read_only=True, data_only=True)
-    ws = wb.active
-    rows = list(ws.iter_rows(values_only=True))
-    headers = list(rows[1])
-    idx = {name: headers.index(name) for name in headers if name is not None}
-
-    wanted = [
-        "id",
-        "file_name",
-        "file_title",
-        "pdf",
-        "prereg",
-        "link_prereg",
-        "use_aearct",
-        "use_osf",
-        "use_aspredicted",
-        "use_other",
-        "type_lab",
-        "type_field",
-        "type_online",
-        "type_survey",
-        "type_obs",
-    ]
-
-    out = {}
-    for row in rows[2:]:
-        pdf_name = row[idx["pdf"]] if "pdf" in idx else None
-        if not pdf_name:
-            continue
-        pdf_name = str(pdf_name).strip()
-        out[pdf_name] = {
-            "id": row[idx["id"]] if "id" in idx else None,
-            "file_name": row[idx["file_name"]] if "file_name" in idx else None,
-            "title": row[idx["file_title"]] if "file_title" in idx else None,
-            "prereg": row[idx["prereg"]] if "prereg" in idx else None,
-            "link_prereg": row[idx["link_prereg"]] if "link_prereg" in idx else None,
-            "use_aearct": row[idx["use_aearct"]] if "use_aearct" in idx else None,
-            "use_osf": row[idx["use_osf"]] if "use_osf" in idx else None,
-            "use_aspredicted": row[idx["use_aspredicted"]] if "use_aspredicted" in idx else None,
-            "use_other": row[idx["use_other"]] if "use_other" in idx else None,
-            "type_lab": row[idx["type_lab"]] if "type_lab" in idx else None,
-            "type_field": row[idx["type_field"]] if "type_field" in idx else None,
-            "type_online": row[idx["type_online"]] if "type_online" in idx else None,
-            "type_survey": row[idx["type_survey"]] if "type_survey" in idx else None,
-            "type_obs": row[idx["type_obs"]] if "type_obs" in idx else None,
-        }
-
-    wb.close()
     return out
 
 
 def int_or_none(val):
     try:
-        return int(val)
+        if val in (None, ""):
+            return None
+        return int(float(val))
     except (TypeError, ValueError):
         return None
 
@@ -241,56 +160,79 @@ def clean_text_or_none(val):
 def split_links(raw: str | None) -> list[str]:
     if not raw:
         return []
-    return [part.strip() for part in str(raw).split(";") if part and part.strip()]
+    out = []
+    seen = set()
+    for part in str(raw).split(";"):
+        text = part.strip().rstrip(".,;:")
+        if text and text not in seen:
+            seen.add(text)
+            out.append(text)
+    return out
+
+
+def is_generic_registry_link(url: str | None) -> bool:
+    text = (url or "").strip().rstrip(".,;:")
+    if not text:
+        return True
+    return any(pattern.match(text) for pattern in GENERIC_LINK_PATTERNS)
+
+
+def specific_links(raw: str | None) -> list[str]:
+    return [link for link in split_links(raw) if not is_generic_registry_link(link)]
+
+
+def accepted_registry_links(links: list[str], ai_prereg_bool, quality: str | None = None) -> list[str]:
+    accepted = []
+    for link in links:
+        domain = link_domain(link)
+        if domain in TRUST_DIRECT_PDF_LINK_DOMAINS:
+            accepted.append(link)
+            continue
+        if domain in CAUTIOUS_LINK_DOMAINS:
+            if ai_prereg_bool is True:
+                accepted.append(link)
+            continue
+        if quality == "AI_LINK_REJECTED":
+            continue
+        if ai_prereg_bool is False:
+            continue
+        accepted.append(link)
+    return accepted
 
 
 def unique_preserve(items: list[str]) -> list[str]:
     seen = set()
     out = []
     for item in items:
-        if item not in seen:
+        if item and item not in seen:
             seen.add(item)
             out.append(item)
     return out
 
 
 def canonicalize_link(url: str) -> str:
-    text = (url or "").strip().lower()
+    text = (url or "").strip().rstrip(".,;:").lower()
     if not text:
         return ""
-
     aea_match = re.search(r"(?:socialscienceregistry\.org/trials/|aearctr[-:])0*(\d+)", text)
     if aea_match:
         return f"aearctr:{int(aea_match.group(1))}"
-
     asp_match = re.search(r"aspredicted\.org/(?:blind\.php\?x=)?([a-z0-9]+)", text)
     if asp_match:
         return f"aspredicted:{asp_match.group(1)}"
-
     osf_match = re.search(r"osf\.io/(?:preprints/osf/)?([a-z0-9]+)", text)
     if osf_match:
         return f"osf:{osf_match.group(1)}"
-
     text = re.sub(r"^https?://", "", text)
     text = re.sub(r"^www\.", "", text)
-    text = text.rstrip("/")
-    return text
+    return text.rstrip("/")
 
 
-def compare_link_sets(xlsx_raw: str | None, final_links: list[str]) -> tuple[int, str]:
-    xlsx_links = split_links(xlsx_raw)
-    xlsx_norm = {canonicalize_link(x) for x in xlsx_links if canonicalize_link(x)}
-    final_norm = {canonicalize_link(x) for x in final_links if canonicalize_link(x)}
-
-    if not xlsx_norm and not final_norm:
-        return 0, "both_empty"
-    if not xlsx_norm and final_norm:
-        return 1, "xlsx_missing_final_present"
-    if xlsx_norm and not final_norm:
-        return 1, "xlsx_present_final_missing"
-    if xlsx_norm & final_norm:
-        return 0, "match"
-    return 1, "different_link"
+def link_domain(url: str | None) -> str:
+    text = (url or "").strip().rstrip(".,;:")
+    if not text or "://" not in text:
+        return ""
+    return urlparse(text).netloc.lower().removeprefix("www.")
 
 
 def normalized_title(text: str | None) -> str:
@@ -304,12 +246,10 @@ def prefer_longer_matching_title(current: str | None, candidate: str | None) -> 
         return current
     if not current:
         return candidate
-
     cur_norm = normalized_title(current)
     cand_norm = normalized_title(candidate)
     if not cur_norm or not cand_norm:
         return current
-
     if cur_norm == cand_norm:
         return candidate if len(candidate) > len(current) else current
     shorter, longer = sorted((cur_norm, cand_norm), key=len)
@@ -320,8 +260,6 @@ def prefer_longer_matching_title(current: str | None, candidate: str | None) -> 
         or shorter.endswith(" " + longer)
     )
     if boundary_extension and (len(shorter) / len(longer)) >= 0.55:
-        return candidate if len(candidate) > len(current) else current
-    if SequenceMatcher(None, cur_norm, cand_norm).ratio() >= 0.92:
         return candidate if len(candidate) > len(current) else current
     return current
 
@@ -337,57 +275,57 @@ def extract_evidence_location(evidence: str | None, reasoning: str | None) -> st
     return "; ".join(found) if found else None
 
 
-def maybe_fetch_registry_title(
-    current_title: str | None,
-    candidate_url: str | None,
-    paper_title: str | None,
-    paper_doi: str | None,
-    best_quality: str | None,
-    cache: dict[str, str | None],
-) -> str | None:
+def ai_supports_prereg_without_link(ai_prereg_bool, ai_evidence, ai_reasoning, ai_registry_url) -> bool:
+    if ai_prereg_bool is not True:
+        return False
+    if clean_text_or_none(ai_registry_url):
+        return True
+    combined = f"{ai_evidence or ''} {ai_reasoning or ''}".lower()
+    strong_patterns = [
+        r"\bpre-?registered\b",
+        r"\bpreregistered\b",
+        r"\bpre-?registration\b",
+        r"\bregistered report\b",
+        r"\bregistered an analysis plan\b",
+        r"\bpre-?analysis plan\b.{0,140}\b(?:before|prior to|a priori)\b",
+        r"\bas we preregistered\b",
+    ]
+    return any(re.search(pattern, combined, re.I | re.DOTALL) for pattern in strong_patterns)
+
+
+def maybe_fetch_registry_title(current_title, candidate_url, paper_title, paper_doi, best_quality, cache):
     if current_title or not candidate_url:
         return current_title
     if (best_quality or "").strip() not in FINAL_ACCEPTED_LINK_QUALITIES:
         return current_title
-
     if candidate_url not in cache:
         try:
             from find_prereg_links import validate_link_quality
-
             fetched = validate_link_quality(candidate_url, paper_title or "", paper_doi or "")
             cache[candidate_url] = clean_text_or_none(fetched.get("registry_page_title"))
         except Exception:
             cache[candidate_url] = None
-
     fetched_title = cache.get(candidate_url)
     if not fetched_title:
         return current_title
-
-    reference_title = current_title or paper_title
-    if not reference_title:
-        return fetched_title
-
-    chosen = prefer_longer_matching_title(reference_title, fetched_title)
-    return fetched_title if chosen == fetched_title else current_title
+    return prefer_longer_matching_title(current_title or paper_title, fetched_title)
 
 
-def pick_final_link(
-    auto_link_raw: str | None,
-    all_found_raw: str | None,
-    ai_registry_url: str | None,
-    best_quality: str | None,
-) -> tuple[str | None, int, str, list[str]]:
-    auto_links = split_links(auto_link_raw)
-    enriched_links = split_links(all_found_raw)
-    ai_links = split_links(ai_registry_url)
+def pick_final_link(auto_link_raw, all_found_raw, ai_registry_url, best_quality, ai_prereg_bool):
+    auto_links = specific_links(auto_link_raw)
+    enriched_links = specific_links(all_found_raw)
+    ai_links = specific_links(ai_registry_url) if ai_prereg_bool is True else []
+    quality = (best_quality or "").strip()
 
-    accepted_enriched = (
-        enriched_links if (best_quality or "").strip() in FINAL_ACCEPTED_LINK_QUALITIES else []
-    )
-    final_links = unique_preserve(auto_links + accepted_enriched + ai_links)
+    accepted_auto = accepted_registry_links(auto_links, ai_prereg_bool, quality)
 
-    if auto_links:
-        return auto_links[0], 1, "pdf_text", final_links
+    accepted_enriched = []
+    if enriched_links and quality in FINAL_ACCEPTED_LINK_QUALITIES:
+        accepted_enriched = accepted_registry_links(enriched_links, ai_prereg_bool, quality)
+
+    final_links = unique_preserve(accepted_auto + accepted_enriched + ai_links)
+    if accepted_auto:
+        return accepted_auto[0], 1, "pdf_text", final_links
     if accepted_enriched:
         return accepted_enriched[0], 1, "enrichment_verified", final_links
     if ai_links:
@@ -395,18 +333,11 @@ def pick_final_link(
     return None, 0, "none", []
 
 
-def derive_platform_flags(
-    auto_use_aearct: int | None,
-    auto_use_osf: int | None,
-    auto_use_asp: int | None,
-    auto_use_other: int | None,
-    final_links: list[str],
-) -> tuple[int, int, int, int]:
+def derive_platform_flags(auto_use_aearct, auto_use_osf, auto_use_asp, auto_use_other, final_links):
     final_aearct = 1 if auto_use_aearct == 1 else 0
     final_osf = 1 if auto_use_osf == 1 else 0
     final_asp = 1 if auto_use_asp == 1 else 0
     final_other = 1 if auto_use_other == 1 else 0
-
     for link in final_links:
         canon = canonicalize_link(link)
         if canon.startswith("aearctr:"):
@@ -417,7 +348,6 @@ def derive_platform_flags(
             final_asp = 1
         elif any(domain in canon for domain in ("clinicaltrials.gov", "egap.org", "ridie")):
             final_other = 1
-
     return final_aearct, final_osf, final_asp, final_other
 
 
@@ -430,53 +360,27 @@ def write_sheet_header(ws, columns):
 
 
 def write_summary_sheets(wb, rows: list[dict]):
-    summary_ws = wb.create_sheet("comparison_summary")
+    summary_ws = wb.create_sheet("summary")
     summary_ws.append(["metric", "value"])
     summary_ws["A1"].font = BOLD
     summary_ws["B1"].font = BOLD
-    summary_ws.column_dimensions["A"].width = 34
-    summary_ws.column_dimensions["B"].width = 14
-
     metrics = [
         ("total_papers", len(rows)),
         ("final_prereg_1", sum(1 for r in rows if r["final_prereg_decision"] == 1)),
         ("final_link_1", sum(1 for r in rows if r["final_link_decision"] == 1)),
         ("experiment_1", sum(1 for r in rows if r["experiment"] == 1)),
-        ("xlsx_prereg_1", sum(1 for r in rows if r["xlsx_prereg"] == 1)),
-        ("xlsx_prereg_0", sum(1 for r in rows if r["xlsx_prereg"] == 0)),
-        ("prereg_matches_1", sum(1 for r in rows if r["prereg_match_status"] == "match_1")),
-        ("prereg_matches_0", sum(1 for r in rows if r["prereg_match_status"] == "match_0")),
-        ("prereg_inconsistent", sum(1 for r in rows if r["prereg_inconsistent"] == 1)),
-        ("link_inconsistent", sum(1 for r in rows if r["link_inconsistent"] == 1)),
+        ("ai_prereg_true", sum(1 for r in rows if r["ai_prereg"] == "True")),
+        ("best_link_verified", sum(1 for r in rows if r["best_link_quality"] in FINAL_ACCEPTED_LINK_QUALITIES)),
     ]
     for metric, value in metrics:
         summary_ws.append([metric, value])
 
     journal_ws = wb.create_sheet("journal_summary")
-    journal_headers = [
-        "journal",
-        "total_papers",
-        "experiment_papers",
-        "final_prereg_papers",
-        "final_prereg_and_experiment",
-        "prereg_share_all",
-        "prereg_share_experiment",
-        "prereg_inconsistent",
-        "link_inconsistent",
-    ]
-    journal_ws.append(journal_headers)
+    headers = ["journal", "total_papers", "experiment_papers", "final_prereg_papers", "final_link_papers"]
+    journal_ws.append(headers)
     for cell in journal_ws[1]:
         cell.font = BOLD
-
-    stats_by_journal = defaultdict(lambda: {
-        "total": 0,
-        "experiment": 0,
-        "final_prereg": 0,
-        "exp_prereg": 0,
-        "prereg_inconsistent": 0,
-        "link_inconsistent": 0,
-    })
-
+    stats_by_journal = defaultdict(lambda: {"total": 0, "experiment": 0, "final_prereg": 0, "final_link": 0})
     for row in rows:
         journal = row["journal"] or "(missing)"
         stats = stats_by_journal[journal]
@@ -485,135 +389,57 @@ def write_summary_sheets(wb, rows: list[dict]):
             stats["experiment"] += 1
         if row["final_prereg_decision"] == 1:
             stats["final_prereg"] += 1
-        if row["experiment"] == 1 and row["final_prereg_decision"] == 1:
-            stats["exp_prereg"] += 1
-        if row["prereg_inconsistent"] == 1:
-            stats["prereg_inconsistent"] += 1
-        if row["link_inconsistent"] == 1:
-            stats["link_inconsistent"] += 1
-
+        if row["final_link_decision"] == 1:
+            stats["final_link"] += 1
     for journal in sorted(stats_by_journal):
         stats = stats_by_journal[journal]
-        prereg_share_all = stats["final_prereg"] / stats["total"] if stats["total"] else None
-        prereg_share_exp = stats["exp_prereg"] / stats["experiment"] if stats["experiment"] else None
-        journal_ws.append([
-            journal,
-            stats["total"],
-            stats["experiment"],
-            stats["final_prereg"],
-            stats["exp_prereg"],
-            prereg_share_all,
-            prereg_share_exp,
-            stats["prereg_inconsistent"],
-            stats["link_inconsistent"],
-        ])
-
-    for col_idx, width in enumerate((35, 12, 16, 18, 24, 16, 22, 18, 16), start=1):
-        journal_ws.column_dimensions[get_column_letter(col_idx)].width = width
+        journal_ws.append([journal, stats["total"], stats["experiment"], stats["final_prereg"], stats["final_link"]])
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Build pipeline findings XLSX")
-    parser.add_argument(
-        "--scan",
-        type=str,
-        default=None,
-        help=f"Path to scan CSV (default: {DEFAULT_SCAN})",
-    )
-    parser.add_argument(
-        "--links",
-        type=str,
-        default=None,
-        help=f"Path to enriched links CSV (default: {DEFAULT_LINKS_CSV})",
-    )
-    parser.add_argument(
-        "--verdicts",
-        type=str,
-        default=None,
-        help=f"Path to LLM verdict CSV (default: {DEFAULT_VERDICTS_CSV})",
-    )
-    parser.add_argument(
-        "--xlsx",
-        type=str,
-        default=None,
-        help=f"Path to reference spreadsheet (default: {DEFAULT_SOURCE_XLSX})",
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        default=None,
-        help=f"Path to output workbook (default: {DEFAULT_OUT_XLSX})",
-    )
+    parser = argparse.ArgumentParser(description="Build clean pipeline results files")
+    parser.add_argument("--scan", type=str, default=None, help=f"Path to scan CSV (default: {DEFAULT_SCAN})")
+    parser.add_argument("--links", type=str, default=None, help=f"Path to enriched links CSV (default: {DEFAULT_LINKS_CSV})")
+    parser.add_argument("--verdicts", type=str, default=None, help=f"Path to LLM verdict CSV (default: {DEFAULT_VERDICTS_CSV})")
+    parser.add_argument("--output-xlsx", type=str, default=None, help=f"Path to output workbook (default: {DEFAULT_OUT_XLSX})")
+    parser.add_argument("--output-csv", type=str, default=None, help=f"Path to output CSV (default: {DEFAULT_OUT_CSV})")
     args = parser.parse_args()
 
     scan_csv = resolve_existing_path(args.scan, DEFAULT_SCAN, "scan CSV", fallbacks=[FALLBACK_SCAN])
-    links_csv = resolve_existing_path(
-        args.links,
-        DEFAULT_LINKS_CSV,
-        "enriched links CSV",
-        fallbacks=[FALLBACK_LINKS_CSV],
-        required=False,
-    )
+    links_csv = resolve_existing_path(args.links, DEFAULT_LINKS_CSV, "enriched links CSV", fallbacks=[FALLBACK_LINKS_CSV], required=False)
     verdicts_csv = resolve_existing_path(
         args.verdicts,
         DEFAULT_VERDICTS_CSV,
         "LLM verdict CSV",
+        fallbacks=[FALLBACK_VERDICTS_CSV],
         required=False,
     )
-    source_xlsx = resolve_existing_path(
-        args.xlsx,
-        DEFAULT_SOURCE_XLSX,
-        "reference spreadsheet",
-        required=False,
-    )
-    out_xlsx = resolve_output_path(args.output, DEFAULT_OUT_XLSX)
-
-    print(f"Using scan CSV: {scan_csv.name}")
-    print(f"Using links CSV: {links_csv.name}")
+    out_xlsx = resolve_output_path(args.output_xlsx, DEFAULT_OUT_XLSX)
+    out_csv = resolve_output_path(args.output_csv, DEFAULT_OUT_CSV)
 
     scan = load_csv(scan_csv)
     links = load_csv(links_csv)
     verdicts = load_csv(verdicts_csv)
-    refs = load_reference_rows(source_xlsx)
-
-    print(f"Scan rows:     {len(scan)}")
-    print(f"Link rows:     {len(links)}")
-    print(f"Verdict rows:  {len(verdicts)}")
-    print(f"XLSX refs:     {len(refs)}")
 
     out_wb = openpyxl.Workbook()
     out_ws = out_wb.active
-    out_ws.title = "pipeline_findings"
+    out_ws.title = "pipeline_results"
     write_sheet_header(out_ws, COLUMNS)
     out_ws.freeze_panes = "A2"
 
     rows_for_summary = []
-    title_cache: dict[str, str | None] = {}
+    title_cache = {}
 
     for filename, scan_row in sorted(scan.items()):
         link_row = links.get(filename, {})
         verdict_row = verdicts.get(filename, {})
-        ref = refs.get(filename, {})
 
-        paper_id = ref.get("id")
-        file_name = clean_text_or_none(ref.get("file_name")) or clean_text_or_none(scan_row.get("pdf_path"))
-        title = ref.get("title") or link_row.get("title_guess") or None
-        title = prefer_longer_matching_title(title, link_row.get("title_guess"))
-        title = prefer_longer_matching_title(title, link_row.get("best_link_title"))
+        title = clean_text_or_none(link_row.get("title_guess"))
+        best_link_title = clean_text_or_none(link_row.get("best_link_title"))
+        title = prefer_longer_matching_title(title, best_link_title)
         doi = clean_text_or_none(link_row.get("doi_from_pdf"))
+        pdf_path = clean_text_or_none(scan_row.get("pdf_path"))
         text_source = clean_text_or_none(scan_row.get("text_source"))
-
-        xlsx_prereg = ref.get("prereg")
-        xlsx_link_prereg = clean_text_or_none(ref.get("link_prereg"))
-        xlsx_use_aearct = int_or_none(ref.get("use_aearct"))
-        xlsx_use_osf = int_or_none(ref.get("use_osf"))
-        xlsx_use_asp = int_or_none(ref.get("use_aspredicted"))
-        xlsx_use_other = int_or_none(ref.get("use_other"))
-        xlsx_type_lab = int_or_none(ref.get("type_lab"))
-        xlsx_type_field = int_or_none(ref.get("type_field"))
-        xlsx_type_online = int_or_none(ref.get("type_online"))
-        xlsx_type_survey = int_or_none(ref.get("type_survey"))
-        xlsx_type_obs = int_or_none(ref.get("type_obs"))
 
         no_data = int_or_none(scan_row.get("auto_no_data"))
         auto_prereg = int_or_none(scan_row.get("auto_prereg"))
@@ -627,62 +453,35 @@ def main():
         auto_type_online = int_or_none(scan_row.get("auto_type_online"))
         auto_type_survey = int_or_none(scan_row.get("auto_type_survey"))
         auto_type_obs = int_or_none(scan_row.get("auto_type_obs"))
-        if auto_type_obs == 1 and any(value == 1 for value in (auto_type_lab, auto_type_field, auto_type_online)):
+        if auto_type_obs == 1 and any(v == 1 for v in (auto_type_lab, auto_type_field, auto_type_online)):
             auto_type_obs = 0
 
         all_found_links = clean_text_or_none(link_row.get("all_found_links"))
         best_link_quality = clean_text_or_none(link_row.get("best_link_quality"))
-        best_link_title = clean_text_or_none(link_row.get("best_link_title"))
         author_match = clean_text_or_none(link_row.get("author_match"))
         if not auto_link_prereg:
             auto_link_prereg = clean_text_or_none(link_row.get("auto_link_prereg"))
 
         ai_prereg_bool = to_bool_or_none(verdict_row.get("llm_prereg"))
-        if ai_prereg_bool is True:
-            ai_prereg = "True"
-        elif ai_prereg_bool is False:
-            ai_prereg = "False"
-        else:
-            ai_prereg = None
-
+        ai_prereg = "True" if ai_prereg_bool is True else "False" if ai_prereg_bool is False else None
         conf_str = (clean_text_or_none(verdict_row.get("llm_confidence")) or "").lower()
         ai_confidence = CONFIDENCE_MAP.get(conf_str)
         ai_evidence = clean_text_or_none(verdict_row.get("llm_evidence"))
         ai_registry_url = clean_text_or_none(verdict_row.get("llm_registry_url"))
         ai_reasoning = clean_text_or_none(verdict_row.get("llm_reasoning"))
-
-        ai_link_check = clean_text_or_none(link_row.get("ai_link_check")) or ""
-        ai_link_reason = clean_text_or_none(link_row.get("ai_link_reasoning")) or ""
-        if ai_link_check and not ai_reasoning:
-            ai_reasoning = ai_link_reason or None
-        if ai_link_check and not ai_evidence:
-            ai_evidence = ai_link_reason or None
-        if ai_link_check and ai_prereg is None:
-            if ai_link_check.startswith("confirmed_"):
-                ai_prereg = "True"
-                ai_prereg_bool = True
-            elif ai_link_check.startswith("rejected_"):
-                ai_prereg = "False"
-                ai_prereg_bool = False
-        if ai_link_check and ai_confidence is None:
-            ai_link_conf = ai_link_check.replace("confirmed_", "").replace("rejected_", "")
-            ai_confidence = CONFIDENCE_MAP.get(ai_link_conf)
+        ai_evidence_location = extract_evidence_location(ai_evidence, ai_reasoning)
 
         if ai_registry_url and not all_found_links:
             all_found_links = ai_registry_url
         elif ai_registry_url:
-            merged_links = unique_preserve(split_links(all_found_links) + split_links(ai_registry_url))
-            all_found_links = "; ".join(merged_links)
-            if not best_link_quality:
-                best_link_quality = "ai"
-
-        ai_evidence_location = extract_evidence_location(ai_evidence, ai_reasoning)
+            all_found_links = "; ".join(unique_preserve(split_links(all_found_links) + split_links(ai_registry_url)))
 
         final_link_url, final_link_decision, final_link_source, final_links = pick_final_link(
             auto_link_prereg,
             all_found_links,
             ai_registry_url,
             best_link_quality,
+            ai_prereg_bool,
         )
         best_link_title = maybe_fetch_registry_title(
             best_link_title,
@@ -695,76 +494,30 @@ def main():
         title = prefer_longer_matching_title(title, best_link_title)
 
         auto_use_aearct, auto_use_osf, auto_use_asp, auto_use_other = derive_platform_flags(
-            auto_use_aearct,
-            auto_use_osf,
-            auto_use_asp,
-            auto_use_other,
-            final_links,
+            auto_use_aearct, auto_use_osf, auto_use_asp, auto_use_other, final_links
         )
-
         final_use_aearct, final_use_osf, final_use_asp, final_use_other = derive_platform_flags(
-            auto_use_aearct,
-            auto_use_osf,
-            auto_use_asp,
-            auto_use_other,
-            final_links,
+            auto_use_aearct, auto_use_osf, auto_use_asp, auto_use_other, final_links
         )
 
-        experiment = 1 if any(
-            value == 1
-            for value in (
-                auto_type_lab,
-                auto_type_field,
-                auto_type_online,
-                auto_type_survey,
-                auto_type_obs,
-            )
-        ) else 0
-
-        if final_link_decision == 1 and ai_prereg_bool is True:
+        experiment = 1 if any(v == 1 for v in (auto_type_lab, auto_type_field, auto_type_online, auto_type_survey, auto_type_obs)) else 0
+        ai_only_prereg = ai_supports_prereg_without_link(ai_prereg_bool, ai_evidence, ai_reasoning, ai_registry_url)
+        if final_link_decision == 1 and ai_only_prereg:
             final_prereg_source = "link+ai"
         elif final_link_decision == 1:
             final_prereg_source = f"link:{final_link_source}"
-        elif ai_prereg_bool is True:
+        elif ai_only_prereg:
             final_prereg_source = "ai_only"
         else:
             final_prereg_source = "none"
-
-        final_prereg_decision = 1 if (final_link_decision == 1 or ai_prereg_bool is True) else 0
-        pipeline_prereg = final_prereg_decision  # keep legacy column name for continuity
-
-        if xlsx_prereg in (0, 1):
-            prereg_inconsistent = 1 if final_prereg_decision != xlsx_prereg else 0
-            if final_prereg_decision == 1 and xlsx_prereg == 1:
-                prereg_match_status = "match_1"
-            elif final_prereg_decision == 0 and xlsx_prereg == 0:
-                prereg_match_status = "match_0"
-            else:
-                prereg_match_status = "different"
-        else:
-            prereg_inconsistent = 0
-            prereg_match_status = "xlsx_blank"
-
-        link_inconsistent, link_match_status = compare_link_sets(xlsx_link_prereg, final_links)
+        final_prereg_decision = 1 if (final_link_decision == 1 or ai_only_prereg) else 0
 
         row_dict = {
-            "id": paper_id,
             "filename": filename,
-            "file_name": file_name,
+            "pdf_path": pdf_path,
             "journal": scan_row.get("journal") or None,
             "title": title,
             "doi": doi,
-            "xlsx_prereg": xlsx_prereg,
-            "xlsx_link_prereg": xlsx_link_prereg,
-            "xlsx_use_aearct": xlsx_use_aearct,
-            "xlsx_use_osf": xlsx_use_osf,
-            "xlsx_use_aspredicted": xlsx_use_asp,
-            "xlsx_use_other": xlsx_use_other,
-            "xlsx_type_lab": xlsx_type_lab,
-            "xlsx_type_field": xlsx_type_field,
-            "xlsx_type_online": xlsx_type_online,
-            "xlsx_type_survey": xlsx_type_survey,
-            "xlsx_type_obs": xlsx_type_obs,
             "text_source": text_source,
             "no_data": no_data,
             "auto_prereg": auto_prereg,
@@ -798,13 +551,7 @@ def main():
             "experiment": experiment,
             "final_prereg_decision": final_prereg_decision,
             "final_prereg_source": final_prereg_source,
-            "pipeline_prereg": pipeline_prereg,
-            "prereg_inconsistent": prereg_inconsistent,
-            "prereg_match_status": prereg_match_status,
-            "link_inconsistent": link_inconsistent,
-            "link_match_status": link_match_status,
         }
-
         out_ws.append([row_dict[name] for name, _, _ in COLUMNS])
         rows_for_summary.append(row_dict)
 
@@ -812,19 +559,17 @@ def main():
     write_summary_sheets(out_wb, rows_for_summary)
     out_wb.save(str(out_xlsx))
 
-    final_prereg_1 = sum(1 for r in rows_for_summary if r["final_prereg_decision"] == 1)
-    final_link_1 = sum(1 for r in rows_for_summary if r["final_link_decision"] == 1)
-    experiment_1 = sum(1 for r in rows_for_summary if r["experiment"] == 1)
-    prereg_inconsistent = sum(1 for r in rows_for_summary if r["prereg_inconsistent"] == 1)
-    link_inconsistent = sum(1 for r in rows_for_summary if r["link_inconsistent"] == 1)
+    with open(out_csv, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=[name for name, _, _ in COLUMNS])
+        writer.writeheader()
+        writer.writerows(rows_for_summary)
 
-    print(f"\nDone - {len(rows_for_summary)} papers written")
-    print(f"  final_prereg_decision=1 : {final_prereg_1}")
-    print(f"  final_link_decision=1   : {final_link_1}")
-    print(f"  experiment=1            : {experiment_1}")
-    print(f"  prereg_inconsistent=1   : {prereg_inconsistent}")
-    print(f"  link_inconsistent=1     : {link_inconsistent}")
-    print(f"  Output: {out_xlsx}")
+    print(f"Done - {len(rows_for_summary)} papers written")
+    print(f"  final_prereg_decision=1 : {sum(1 for r in rows_for_summary if r['final_prereg_decision'] == 1)}")
+    print(f"  final_link_decision=1   : {sum(1 for r in rows_for_summary if r['final_link_decision'] == 1)}")
+    print(f"  experiment=1            : {sum(1 for r in rows_for_summary if r['experiment'] == 1)}")
+    print(f"  CSV  : {out_csv}")
+    print(f"  XLSX : {out_xlsx}")
 
 
 if __name__ == "__main__":

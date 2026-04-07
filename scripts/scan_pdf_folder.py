@@ -180,7 +180,26 @@ def _strip_spaces(s: str) -> str:
     return re.sub(r'(?<=\d) (?=\d)', '', s)
 
 
+def _repair_registry_url_spacing(text: str) -> str:
+    cleaned = text or ""
+    replacements = [
+        (r"https?\s*:\s*/\s*/\s*", lambda m: "https://" if "https" in m.group(0).lower() else "http://"),
+        (r"aspredicted\s*\.\s*org", "aspredicted.org"),
+        (r"osf\s*\.\s*io", "osf.io"),
+        (r"egap\s*\.\s*org", "egap.org"),
+        (r"socialscienceregistry\s*\.\s*org", "socialscienceregistry.org"),
+        (r"blind\s*\.\s*php", "blind.php"),
+        (r"\?\s*x\s*=\s*", "?x="),
+        (r"/\s+", "/"),
+        (r"\s+/", "/"),
+    ]
+    for pattern, replacement in replacements:
+        cleaned = re.sub(pattern, replacement, cleaned, flags=re.IGNORECASE)
+    return cleaned
+
+
 def extract_prereg_urls(text: str) -> list:
+    text = _repair_registry_url_spacing(text)
     found = []
     for pat in COMPILED_PREREG_URLS:
         for match in pat.findall(text):

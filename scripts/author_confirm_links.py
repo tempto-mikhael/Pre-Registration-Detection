@@ -3,13 +3,16 @@ author_confirm_links.py
 -----------------------
 Post-processing pass over pdf_scan_prereg_links_dedup.csv.
 
-For every row whose best_link_quality is UNCERTAIN, TITLE_MISMATCH, or
-NO_TITLE (and that has at least one link in all_found_links):
+For every row whose best_link_quality is UNCERTAIN or NO_TITLE (and that has
+at least one link in all_found_links):
 
   1. Re-fetch the registry page (via validate_link_quality).
   2. Look up paper author family names from CrossRef (by DOI, then by title).
   3. Check what fraction of those names appear on the registry page.
   4. If >= 50 % → upgrade best_link_quality to AUTHOR_CONFIRMED.
+
+TITLE_MISMATCH rows are intentionally excluded. Shared authors alone are not
+enough to rescue a registry page whose title points to a different study.
   5. Write author_match detail ("2/3 (smith, jones)") in a new column.
 
 The dedup CSV is updated in-place (author_match + best_link_quality columns added/updated).
@@ -41,7 +44,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 DEFAULT_DEDUP_CSV = PROJECT_ROOT / "output" / "pdf_scan_prereg_links_dedup.csv"
 FALLBACK_ENRICHED_CSV = PROJECT_ROOT / "output" / "pdf_scan_prereg_links.csv"
 
-CANDIDATES = {"UNCERTAIN", "TITLE_MISMATCH", "NO_TITLE"}
+CANDIDATES = {"UNCERTAIN", "NO_TITLE"}
 AUTHOR_MATCH_THRESHOLD = 0.50
 
 
@@ -184,7 +187,7 @@ def main():
         if overlap >= AUTHOR_MATCH_THRESHOLD:
             r["best_link_quality"] = "AUTHOR_CONFIRMED"
             upgraded += 1
-            print(f"  ↑ AUTHOR_CONFIRMED")
+            print("  -> AUTHOR_CONFIRMED")
 
         time.sleep(args.delay * 0.2)
 
