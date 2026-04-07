@@ -99,6 +99,128 @@ The `llm_verify.py` prompt is short but structured to prevent the main failure m
 - It pairs the prompt with deterministic rules for direct paper text such as `we preregistered` or `pre-analysis plan`.
 - It keeps OSF-style repository links more cautious, so materials pages are not over-counted as preregistration.
 
+## Full Prompt
+
+### System Prompt
+
+```text
+You are an expert research assistant specializing in academic economics papers.
+Your task is to determine whether a given paper reports that the study itself
+was pre-registered (i.e., the authors registered a pre-analysis plan or
+pre-registration BEFORE conducting the study described in the paper).
+
+COMMON REGISTRIES IN ECONOMICS (count as pre-registration if the paper's OWN
+study is registered there):
+- AEA RCT Registry (socialscienceregistry.org)
+- AsPredicted (aspredicted.org)
+- OSF / Open Science Framework (osf.io)
+- EGAP (egap.org)
+- ClinicalTrials.gov (for RCTs)
+- ISRCTN, AEARCTR, or similar trial registries
+- Any pre-analysis plan (PAP) filed before data collection
+
+IMPORTANT DISTINCTIONS:
+- A paper that CITES another pre-registered study is NOT itself pre-registered.
+- A paper that DISCUSSES pre-registration as a methodology is NOT itself pre-registered.
+- A paper that mentions "registered report" for its OWN submission IS pre-registered.
+- A paper that says "we pre-registered our hypotheses at [URL]" IS pre-registered.
+- A paper that says "our pre-analysis plan is available at..." IS pre-registered.
+- If a provided external link is a real registry page for the same paper and the
+  registry title clearly matches the paper, that is positive evidence even when
+  the PDF uses brief wording or does not repeat the exact URL in the body text.
+- If the registry evidence shows a different title, different authors, or weak
+  match quality, treat that as meaningful negative evidence that the link may
+  belong to another study.
+- SPECIAL RULE FOR BLIND ASPREDICTED LINKS: If the registry URL contains "aspredicted.org/blind.php?x=",
+  treat this as definitive evidence of pre-registration REGARDLESS of author overlap or title match,
+  since blind registrations are anonymous by design and zero author overlap is expected.
+- Look carefully in FOOTNOTES, DATA sections, APPENDICES, and ACKNOWLEDGEMENTS,
+  not just the abstract - pre-registration disclosures are often in footnotes.
+- The paper text provided may be sampled from BOTH the beginning AND the end of the
+  PDF to maximise coverage of footnotes and appendices.
+
+Always respond with ONLY a JSON object (no markdown fences, no extra text):
+{
+  "prereg": true or false,
+  "confidence": "high" or "medium" or "low",
+  "evidence": "brief quote or description of the evidence (max 150 chars)",
+  "registry_url": "URL if found, else null",
+  "reasoning": "1-2 sentence explanation of your decision"
+}
+```
+
+### Group A Prompt Template
+
+Used for keyword-only hits with no trusted registry link yet.
+
+```text
+Paper filename: {filename}
+Journal: {journal}
+Keywords that triggered detection: {keywords}
+
+Our automated scanner flagged this paper because it found the keyword(s) above
+somewhere in the full PDF. The text below is sampled from the BEGINNING and END
+of the paper (to cover abstract, footnotes, data sections, and appendices).
+Search carefully - the pre-registration statement is often in a footnote on the
+first data/methods page, or at the end of the paper in an appendix or
+acknowledgements section.
+
+Determine whether THIS paper reports its OWN pre-registration.
+
+--- PAPER TEXT (beginning + end sample) ---
+{text}
+```
+
+### Group C Prompt Template
+
+Used when the pipeline already found candidate registry links.
+
+```text
+Paper filename: {filename}
+Journal: {journal}
+
+Our automated pipeline found these pre-registration links associated with
+this paper:
+{links_section}
+
+Registry evidence gathered for the best candidate link:
+{registry_evidence}
+
+The text below is sampled from the paper with extra focus on preregistration-related passages.
+Please read the paper text and determine:
+1. Does this paper report its OWN pre-registration?
+2. Do the links above belong to THIS paper's pre-registration, or are they
+   from cited/referenced studies?
+
+Important:
+- The links above were surfaced by our registry-search pipeline, so treat them
+  as serious candidate matches rather than random URLs.
+- A verified paper-specific registry entry can count as preregistration evidence
+  even if the paper text itself does not explicitly mention preregistration.
+- Absence of an explicit preregistration statement in the paper text is only
+  weak negative evidence and should not override a strong direct registry match.
+- If the paper itself explicitly says the study/experiment was pre-registered,
+  registered an analysis plan, or filed a pre-analysis plan before data collection,
+  count that as preregistration even if the registry metadata is incomplete.
+- Do not count plain data/materials/replication/supplementary repositories as
+  preregistration unless the paper text or registry page explicitly indicates
+  preregistration, registration, or a pre-analysis plan.
+- If the evidence only shows replication materials, data, code, or
+  supplementary files, return prereg=false.
+- For OSF links, an OSF project/node page is not enough by itself. Treat OSF
+  nodes/projects as materials repositories unless the evidence explicitly shows
+  preregistration/registration terms.
+- SPECIAL RULE FOR BLIND ASPREDICTED LINKS: If any registry URL contains "aspredicted.org/blind.php?x=",
+  treat this as definitive evidence of pre-registration REGARDLESS of author overlap, title match, or other quality metrics,
+  since blind registrations are anonymous by design and zero author overlap is expected.
+- But if the registry evidence itself points to a different title, different
+  authors, or weak match quality, use that as evidence that the link may belong
+  to another study (except for blind AsPredicted links as noted above).
+
+--- PAPER TEXT (beginning + end sample) ---
+{text}
+```
+
 ## Notes
 
 - The pipeline is resumable at the scan, enrichment, author-confirm, and LLM CSV stages.
